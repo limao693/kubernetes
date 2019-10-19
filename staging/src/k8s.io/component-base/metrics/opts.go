@@ -18,10 +18,10 @@ package metrics
 
 import (
 	"fmt"
-	"github.com/blang/semver"
-	"github.com/prometheus/client_golang/prometheus"
 	"sync"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // KubeOpts is superset struct for prometheus.Opts. The prometheus Opts structure
@@ -35,8 +35,8 @@ type KubeOpts struct {
 	Subsystem         string
 	Name              string
 	Help              string
-	ConstLabels       prometheus.Labels
-	DeprecatedVersion *semver.Version
+	ConstLabels       map[string]string
+	DeprecatedVersion string
 	deprecateOnce     sync.Once
 	annotateOnce      sync.Once
 	StabilityLevel    StabilityLevel
@@ -53,6 +53,16 @@ const (
 	// the deprecation policy outlined in by the control plane metrics stability KEP.
 	STABLE StabilityLevel = "STABLE"
 )
+
+// setDefaults takes 'ALPHA' in case of empty.
+func (sl *StabilityLevel) setDefaults() {
+	switch *sl {
+	case "":
+		*sl = ALPHA
+	default:
+		// no-op, since we have a StabilityLevel already
+	}
+}
 
 // CounterOpts is an alias for Opts. See there for doc comments.
 type CounterOpts KubeOpts
@@ -123,9 +133,9 @@ type HistogramOpts struct {
 	Subsystem         string
 	Name              string
 	Help              string
-	ConstLabels       prometheus.Labels
+	ConstLabels       map[string]string
 	Buckets           []float64
-	DeprecatedVersion *semver.Version
+	DeprecatedVersion string
 	deprecateOnce     sync.Once
 	annotateOnce      sync.Once
 	StabilityLevel    StabilityLevel
@@ -169,12 +179,12 @@ type SummaryOpts struct {
 	Subsystem         string
 	Name              string
 	Help              string
-	ConstLabels       prometheus.Labels
+	ConstLabels       map[string]string
 	Objectives        map[float64]float64
 	MaxAge            time.Duration
 	AgeBuckets        uint32
 	BufCap            uint32
-	DeprecatedVersion *semver.Version
+	DeprecatedVersion string
 	deprecateOnce     sync.Once
 	annotateOnce      sync.Once
 	StabilityLevel    StabilityLevel

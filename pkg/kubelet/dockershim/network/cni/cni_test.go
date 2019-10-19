@@ -20,7 +20,6 @@ package cni
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -34,6 +33,7 @@ import (
 
 	types020 "github.com/containernetworking/cni/pkg/types/020"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"k8s.io/api/core/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	utiltesting "k8s.io/client-go/util/testing"
@@ -73,15 +73,20 @@ func installPluginUnderTest(t *testing.T, testBinDir, testConfDir, testDataDir, 
 
 	pluginExec := path.Join(testBinDir, binName)
 	f, err = os.Create(pluginExec)
+	require.NoError(t, err)
 
+	// TODO: use mock instead of fake shell script plugin
 	const execScriptTempl = `#!/usr/bin/env bash
+echo -n "{ \"cniVersion\": \"{{.CNIVersion}}\", \"ip4\": { \"ip\": \"{{.PodIP}}/24\" } }"
+if [ "$CNI_COMMAND" = "VERSION" ]; then
+	exit
+fi
 cat > {{.InputFile}}
 env > {{.OutputEnv}}
 echo "%@" >> {{.OutputEnv}}
 export $(echo ${CNI_ARGS} | sed 's/;/ /g') &> /dev/null
 mkdir -p {{.OutputDir}} &> /dev/null
-echo -n "$CNI_COMMAND $CNI_NETNS $K8S_POD_NAMESPACE $K8S_POD_NAME $K8S_POD_INFRA_CONTAINER_ID" >& {{.OutputFile}}
-echo -n "{ \"cniVersion\": \"{{.CNIVersion}}\", \"ip4\": { \"ip\": \"{{.PodIP}}/24\" } }"`
+echo -n "$CNI_COMMAND $CNI_NETNS $K8S_POD_NAMESPACE $K8S_POD_NAME $K8S_POD_INFRA_CONTAINER_ID" >& {{.OutputFile}}`
 
 	inputFile := path.Join(testDataDir, binName+".in")
 	outputFile := path.Join(testDataDir, binName+".out")
@@ -123,14 +128,14 @@ func tearDownPlugin(tmpDir string) {
 	}
 }
 
-type fakeNetworkHost struct {
+type FakeNetworkHost struct {
 	networktest.FakePortMappingGetter
 	kubeClient clientset.Interface
 	pods       []*containertest.FakePod
 }
 
-func NewFakeHost(kubeClient clientset.Interface, pods []*containertest.FakePod, ports map[string][]*hostport.PortMapping) *fakeNetworkHost {
-	host := &fakeNetworkHost{
+func NewFakeHost(kubeClient clientset.Interface, pods []*containertest.FakePod, ports map[string][]*hostport.PortMapping) *FakeNetworkHost {
+	host := &FakeNetworkHost{
 		networktest.FakePortMappingGetter{PortMaps: ports},
 		kubeClient,
 		pods,
@@ -138,15 +143,15 @@ func NewFakeHost(kubeClient clientset.Interface, pods []*containertest.FakePod, 
 	return host
 }
 
-func (fnh *fakeNetworkHost) GetPodByName(name, namespace string) (*v1.Pod, bool) {
+func (fnh *FakeNetworkHost) GetPodByName(name, namespace string) (*v1.Pod, bool) {
 	return nil, false
 }
 
-func (fnh *fakeNetworkHost) GetKubeClient() clientset.Interface {
+func (fnh *FakeNetworkHost) GetKubeClient() clientset.Interface {
 	return fnh.kubeClient
 }
 
-func (fnh *fakeNetworkHost) GetNetNS(containerID string) (string, error) {
+func (fnh *FakeNetworkHost) GetNetNS(containerID string) (string, error) {
 	for _, fp := range fnh.pods {
 		for _, c := range fp.Pod.Containers {
 			if c.ID.ID == containerID {
@@ -157,7 +162,7 @@ func (fnh *fakeNetworkHost) GetNetNS(containerID string) (string, error) {
 	return "", fmt.Errorf("container %q not found", containerID)
 }
 
-func (fnh *fakeNetworkHost) SupportsLegacyFeatures() bool {
+func (fnh *FakeNetworkHost) SupportsLegacyFeatures() bool {
 	return true
 }
 
@@ -223,7 +228,8 @@ func TestCNIPlugin(t *testing.T) {
 	cniPlugin.execer = fexec
 	cniPlugin.loNetwork.CNIConfig = mockLoCNI
 
-	mockLoCNI.On("AddNetworkList", context.TODO(), cniPlugin.loNetwork.NetworkConfig, mock.AnythingOfType("*libcni.RuntimeConf")).Return(&types020.Result{IP4: &types020.IPConfig{IP: net.IPNet{IP: []byte{127, 0, 0, 1}}}}, nil)
+	mockLoCNI.On("AddNetworkList", mock.AnythingOfType("*context.timerCtx"), cniPlugin.loNetwork.NetworkConfig, mock.AnythingOfType("*libcni.RuntimeConf")).Return(&types020.Result{IP4: &types020.IPConfig{IP: net.IPNet{IP: []byte{127, 0, 0, 1}}}}, nil)
+	mockLoCNI.On("DelNetworkList", mock.AnythingOfType("*context.timerCtx"), cniPlugin.loNetwork.NetworkConfig, mock.AnythingOfType("*libcni.RuntimeConf")).Return(nil)
 
 	// Check that status returns an error
 	if err := cniPlugin.Status(); err == nil {
@@ -281,7 +287,7 @@ func TestCNIPlugin(t *testing.T) {
 		RuntimeConfig struct {
 			PortMappings []map[string]interface{}   `json:"portMappings"`
 			Bandwidth    map[string]interface{}     `json:"bandwidth"`
-			IpRanges     [][]map[string]interface{} `json:"ipRanges"`
+			IPRanges     [][]map[string]interface{} `json:"IPRanges"`
 		} `json:"runtimeConfig"`
 	}{}
 	inputBytes, inerr := ioutil.ReadFile(inputFile)
@@ -304,14 +310,14 @@ func TestCNIPlugin(t *testing.T) {
 		t.Errorf("mismatch in expected bandwidth. expected %v got %v", expectedBandwidth, inputConfig.RuntimeConfig.Bandwidth)
 	}
 
-	expectedIpRange := [][]map[string]interface{}{
+	expectedIPRange := [][]map[string]interface{}{
 		{
 			{"subnet": "10.0.2.0/24"},
 		},
 	}
 
-	if !reflect.DeepEqual(inputConfig.RuntimeConfig.IpRanges, expectedIpRange) {
-		t.Errorf("mismatch in expected ipRange. expected %v got %v", expectedIpRange, inputConfig.RuntimeConfig.IpRanges)
+	if !reflect.DeepEqual(inputConfig.RuntimeConfig.IPRanges, expectedIPRange) {
+		t.Errorf("mismatch in expected ipRange. expected %v got %v", expectedIPRange, inputConfig.RuntimeConfig.IPRanges)
 	}
 
 	// Get its IP address
@@ -329,6 +335,7 @@ func TestCNIPlugin(t *testing.T) {
 		t.Errorf("Expected nil: %v", err)
 	}
 	output, err = ioutil.ReadFile(outputFile)
+	require.NoError(t, err)
 	expectedOutput = "DEL /proc/12345/ns/net podNamespace podName test_infra_container"
 	if string(output) != expectedOutput {
 		t.Errorf("Mismatch in expected output for setup hook. Expected '%s', got '%s'", expectedOutput, string(output))

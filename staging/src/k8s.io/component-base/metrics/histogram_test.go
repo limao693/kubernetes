@@ -17,15 +17,16 @@ limitations under the License.
 package metrics
 
 import (
+	"testing"
+
 	"github.com/blang/semver"
 	"github.com/prometheus/client_golang/prometheus"
+
 	apimachineryversion "k8s.io/apimachinery/pkg/version"
-	"testing"
 )
 
 func TestHistogram(t *testing.T) {
 	v115 := semver.MustParse("1.15.0")
-	v114 := semver.MustParse("1.14.0")
 	var tests = []struct {
 		desc string
 		HistogramOpts
@@ -53,7 +54,7 @@ func TestHistogram(t *testing.T) {
 				Name:              "metric_test_name",
 				Subsystem:         "subsystem",
 				Help:              "histogram help message",
-				DeprecatedVersion: &v115,
+				DeprecatedVersion: "1.15.0",
 				Buckets:           prometheus.DefBuckets,
 			},
 			registryVersion:     &v115,
@@ -67,7 +68,7 @@ func TestHistogram(t *testing.T) {
 				Name:              "metric_test_name",
 				Subsystem:         "subsystem",
 				Help:              "histogram help message",
-				DeprecatedVersion: &v114,
+				DeprecatedVersion: "1.14.0",
 				Buckets:           prometheus.DefBuckets,
 			},
 			registryVersion:     &v115,
@@ -78,7 +79,7 @@ func TestHistogram(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.desc, func(t *testing.T) {
-			registry := NewKubeRegistry(apimachineryversion.Info{
+			registry := newKubeRegistry(apimachineryversion.Info{
 				Major:      "1",
 				Minor:      "15",
 				GitVersion: "v1.15.0-alpha-1.12345",
@@ -122,7 +123,6 @@ func TestHistogram(t *testing.T) {
 
 func TestHistogramVec(t *testing.T) {
 	v115 := semver.MustParse("1.15.0")
-	v114 := semver.MustParse("1.14.0")
 	var tests = []struct {
 		desc string
 		HistogramOpts
@@ -152,7 +152,7 @@ func TestHistogramVec(t *testing.T) {
 				Name:              "metric_test_name",
 				Subsystem:         "subsystem",
 				Help:              "histogram help message",
-				DeprecatedVersion: &v115,
+				DeprecatedVersion: "1.15.0",
 				Buckets:           prometheus.DefBuckets,
 			},
 			labels:              []string{"label_a", "label_b"},
@@ -167,7 +167,7 @@ func TestHistogramVec(t *testing.T) {
 				Name:              "metric_test_name",
 				Subsystem:         "subsystem",
 				Help:              "histogram help message",
-				DeprecatedVersion: &v114,
+				DeprecatedVersion: "1.14.0",
 				Buckets:           prometheus.DefBuckets,
 			},
 			labels:              []string{"label_a", "label_b"},
@@ -179,7 +179,7 @@ func TestHistogramVec(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.desc, func(t *testing.T) {
-			registry := NewKubeRegistry(apimachineryversion.Info{
+			registry := newKubeRegistry(apimachineryversion.Info{
 				Major:      "1",
 				Minor:      "15",
 				GitVersion: "v1.15.0-alpha-1.12345",

@@ -22,6 +22,7 @@ import (
 	"github.com/blang/semver"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
+
 	apimachineryversion "k8s.io/apimachinery/pkg/version"
 )
 
@@ -44,7 +45,7 @@ var (
 			Subsystem:         "subsystem",
 			StabilityLevel:    ALPHA,
 			Help:              "counter help",
-			DeprecatedVersion: &v115,
+			DeprecatedVersion: "1.15.0",
 		},
 	)
 	alphaHiddenCounter = NewCounter(
@@ -54,7 +55,7 @@ var (
 			Subsystem:         "subsystem",
 			StabilityLevel:    ALPHA,
 			Help:              "counter help",
-			DeprecatedVersion: &v114,
+			DeprecatedVersion: "1.14.0",
 		},
 	)
 )
@@ -109,7 +110,7 @@ func TestRegister(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.desc, func(t *testing.T) {
-			registry := NewKubeRegistry(apimachineryversion.Info{
+			registry := newKubeRegistry(apimachineryversion.Info{
 				Major:      "1",
 				Minor:      "15",
 				GitVersion: "v1.15.0-alpha-1.12345",
@@ -180,7 +181,7 @@ func TestMustRegister(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.desc, func(t *testing.T) {
-			registry := NewKubeRegistry(apimachineryversion.Info{
+			registry := newKubeRegistry(apimachineryversion.Info{
 				Major:      "1",
 				Minor:      "15",
 				GitVersion: "v1.15.0-alpha-1.12345",
@@ -199,7 +200,7 @@ func TestMustRegister(t *testing.T) {
 
 }
 func TestShowHiddenMetric(t *testing.T) {
-	registry := NewKubeRegistry(apimachineryversion.Info{
+	registry := newKubeRegistry(apimachineryversion.Info{
 		Major:      "1",
 		Minor:      "15",
 		GitVersion: "v1.15.0-alpha-1.12345",
@@ -221,7 +222,7 @@ func TestShowHiddenMetric(t *testing.T) {
 			Subsystem:         "subsystem",
 			StabilityLevel:    ALPHA,
 			Help:              "counter help",
-			DeprecatedVersion: &v114,
+			DeprecatedVersion: "1.14.0",
 		},
 	))
 	expectedMetricCount = 1

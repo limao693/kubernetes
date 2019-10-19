@@ -17,14 +17,15 @@ limitations under the License.
 package metrics
 
 import (
-	"github.com/blang/semver"
-	apimachineryversion "k8s.io/apimachinery/pkg/version"
 	"testing"
+
+	"github.com/blang/semver"
+
+	apimachineryversion "k8s.io/apimachinery/pkg/version"
 )
 
 func TestGauge(t *testing.T) {
 	v115 := semver.MustParse("1.15.0")
-	v114 := semver.MustParse("1.14.0")
 	var tests = []struct {
 		desc string
 		GaugeOpts
@@ -51,7 +52,7 @@ func TestGauge(t *testing.T) {
 				Name:              "metric_test_name",
 				Subsystem:         "subsystem",
 				Help:              "gauge help",
-				DeprecatedVersion: &v115,
+				DeprecatedVersion: "1.15.0",
 			},
 			registryVersion:     &v115,
 			expectedMetricCount: 1,
@@ -64,7 +65,7 @@ func TestGauge(t *testing.T) {
 				Name:              "metric_test_name",
 				Subsystem:         "subsystem",
 				Help:              "gauge help",
-				DeprecatedVersion: &v114,
+				DeprecatedVersion: "1.14.0",
 			},
 			registryVersion:     &v115,
 			expectedMetricCount: 0,
@@ -74,7 +75,7 @@ func TestGauge(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.desc, func(t *testing.T) {
-			registry := NewKubeRegistry(apimachineryversion.Info{
+			registry := newKubeRegistry(apimachineryversion.Info{
 				Major:      "1",
 				Minor:      "15",
 				GitVersion: "v1.15.0-alpha-1.12345",
@@ -117,7 +118,6 @@ func TestGauge(t *testing.T) {
 
 func TestGaugeVec(t *testing.T) {
 	v115 := semver.MustParse("1.15.0")
-	v114 := semver.MustParse("1.14.0")
 	var tests = []struct {
 		desc string
 		GaugeOpts
@@ -146,7 +146,7 @@ func TestGaugeVec(t *testing.T) {
 				Name:              "metric_test_name",
 				Subsystem:         "subsystem",
 				Help:              "gauge help",
-				DeprecatedVersion: &v115,
+				DeprecatedVersion: "1.15.0",
 			},
 			labels:              []string{"label_a", "label_b"},
 			registryVersion:     &v115,
@@ -160,7 +160,7 @@ func TestGaugeVec(t *testing.T) {
 				Name:              "metric_test_name",
 				Subsystem:         "subsystem",
 				Help:              "gauge help",
-				DeprecatedVersion: &v114,
+				DeprecatedVersion: "1.14.0",
 			},
 			labels:              []string{"label_a", "label_b"},
 			registryVersion:     &v115,
@@ -171,7 +171,7 @@ func TestGaugeVec(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.desc, func(t *testing.T) {
-			registry := NewKubeRegistry(apimachineryversion.Info{
+			registry := newKubeRegistry(apimachineryversion.Info{
 				Major:      "1",
 				Minor:      "15",
 				GitVersion: "v1.15.0-alpha-1.12345",
