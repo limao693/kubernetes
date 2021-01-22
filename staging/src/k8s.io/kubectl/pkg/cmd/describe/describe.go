@@ -30,13 +30,12 @@ import (
 	"k8s.io/cli-runtime/pkg/resource"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/describe"
-	describeversioned "k8s.io/kubectl/pkg/describe/versioned"
 	"k8s.io/kubectl/pkg/util/i18n"
 	"k8s.io/kubectl/pkg/util/templates"
 )
 
 var (
-	describeLong = templates.LongDesc(`
+	describeLong = templates.LongDesc(i18n.T(`
 		Show details of a specific resource or group of resources
 
 		Print a detailed description of the selected resources, including related resources such
@@ -46,7 +45,7 @@ var (
 		    $ kubectl describe TYPE NAME_PREFIX
 
 		will first check for an exact match on TYPE and NAME_PREFIX. If no such resource
-		exists, it will output details for every resource that has a name prefixed with NAME_PREFIX.`)
+		exists, it will output details for every resource that has a name prefixed with NAME_PREFIX.`))
 
 	describeExample = templates.Examples(i18n.T(`
 		# Describe a node
@@ -74,7 +73,7 @@ type DescribeOptions struct {
 	Selector  string
 	Namespace string
 
-	Describer  func(*meta.RESTMapping) (describe.Describer, error)
+	Describer  func(*meta.RESTMapping) (describe.ResourceDescriber, error)
 	NewBuilder func() *resource.Builder
 
 	BuilderArgs []string
@@ -136,8 +135,8 @@ func (o *DescribeOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args [
 
 	o.BuilderArgs = args
 
-	o.Describer = func(mapping *meta.RESTMapping) (describe.Describer, error) {
-		return describeversioned.DescriberFn(f, mapping)
+	o.Describer = func(mapping *meta.RESTMapping) (describe.ResourceDescriber, error) {
+		return describe.DescriberFn(f, mapping)
 	}
 
 	o.NewBuilder = f.NewBuilder
@@ -200,6 +199,15 @@ func (o *DescribeOptions) Run() error {
 			fmt.Fprint(o.Out, s)
 		} else {
 			fmt.Fprintf(o.Out, "\n\n%s", s)
+		}
+	}
+
+	if len(infos) == 0 && len(allErrs) == 0 {
+		// if we wrote no output, and had no errors, be sure we output something.
+		if o.AllNamespaces {
+			fmt.Fprintln(o.ErrOut, "No resources found")
+		} else {
+			fmt.Fprintf(o.ErrOut, "No resources found in %s namespace.\n", o.Namespace)
 		}
 	}
 

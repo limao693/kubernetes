@@ -1,3 +1,5 @@
+// +build !dockerless
+
 /*
 Copyright 2016 The Kubernetes Authors.
 
@@ -22,25 +24,27 @@ import (
 	"net/http"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
 	"github.com/blang/semver"
 	dockertypes "github.com/docker/docker/api/types"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 	kubeletconfig "k8s.io/kubernetes/pkg/kubelet/apis/config"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager/errors"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
+	"k8s.io/kubernetes/pkg/kubelet/cri/streaming"
 	"k8s.io/kubernetes/pkg/kubelet/dockershim/cm"
 	"k8s.io/kubernetes/pkg/kubelet/dockershim/network"
 	"k8s.io/kubernetes/pkg/kubelet/dockershim/network/cni"
 	"k8s.io/kubernetes/pkg/kubelet/dockershim/network/hostport"
 	"k8s.io/kubernetes/pkg/kubelet/dockershim/network/kubenet"
-	"k8s.io/kubernetes/pkg/kubelet/server/streaming"
+	"k8s.io/kubernetes/pkg/kubelet/legacy"
 	"k8s.io/kubernetes/pkg/kubelet/util/cache"
 
 	"k8s.io/kubernetes/pkg/kubelet/dockershim/libdocker"
@@ -97,7 +101,7 @@ type DockerService interface {
 	http.Handler
 
 	// For supporting legacy features.
-	DockerLegacyService
+	legacy.DockerLegacyService
 }
 
 // NetworkPluginSettings is the subset of kubelet runtime args we pass
@@ -112,7 +116,7 @@ type NetworkPluginSettings struct {
 	NonMasqueradeCIDR string
 	// PluginName is the name of the plugin, runtime shim probes for
 	PluginName string
-	// PluginBinDirsString is a list of directiores delimited by commas, in
+	// PluginBinDirString is a list of directiores delimited by commas, in
 	// which the binaries for the plugin with PluginName may be found.
 	PluginBinDirString string
 	// PluginBinDirs is an array of directories in which the binaries for
@@ -179,8 +183,6 @@ func NewDockerClientFromConfig(config *ClientConfig) libdocker.Interface {
 			config.DockerEndpoint,
 			config.RuntimeRequestTimeout,
 			config.ImagePullProgressDeadline,
-			config.WithTraceDisabled,
-			config.EnableSleep,
 		)
 		return client
 	}
@@ -191,7 +193,7 @@ func NewDockerClientFromConfig(config *ClientConfig) libdocker.Interface {
 // NewDockerService creates a new `DockerService` struct.
 // NOTE: Anything passed to DockerService should be eventually handled in another way when we switch to running the shim as a different process.
 func NewDockerService(config *ClientConfig, podSandboxImage string, streamingConfig *streaming.Config, pluginSettings *NetworkPluginSettings,
-	cgroupsName string, kubeCgroupDriver string, dockershimRootDir string, startLocalStreamingServer bool) (DockerService, error) {
+	cgroupsName string, kubeCgroupDriver string, dockershimRootDir string) (DockerService, error) {
 
 	client := NewDockerClientFromConfig(config)
 
@@ -210,11 +212,10 @@ func NewDockerService(config *ClientConfig, podSandboxImage string, streamingCon
 			client:      client,
 			execHandler: &NativeExecHandler{},
 		},
-		containerManager:          cm.NewContainerManager(cgroupsName, client),
-		checkpointManager:         checkpointManager,
-		startLocalStreamingServer: startLocalStreamingServer,
-		networkReady:              make(map[string]bool),
-		containerCleanupInfos:     make(map[string]*containerCleanupInfo),
+		containerManager:      cm.NewContainerManager(cgroupsName, client),
+		checkpointManager:     checkpointManager,
+		networkReady:          make(map[string]bool),
+		containerCleanupInfos: make(map[string]*containerCleanupInfo),
 	}
 
 	// check docker version compatibility.
@@ -254,24 +255,28 @@ func NewDockerService(config *ClientConfig, podSandboxImage string, streamingCon
 	ds.network = network.NewPluginManager(plug)
 	klog.Infof("Docker cri networking managed by %v", plug.Name())
 
-	// NOTE: cgroup driver is only detectable in docker 1.11+
-	cgroupDriver := defaultCgroupDriver
-	dockerInfo, err := ds.client.Info()
-	klog.Infof("Docker Info: %+v", dockerInfo)
-	if err != nil {
-		klog.Errorf("Failed to execute Info() call to the Docker client: %v", err)
-		klog.Warningf("Falling back to use the default driver: %q", cgroupDriver)
-	} else if len(dockerInfo.CgroupDriver) == 0 {
-		klog.Warningf("No cgroup driver is set in Docker")
-		klog.Warningf("Falling back to use the default driver: %q", cgroupDriver)
-	} else {
-		cgroupDriver = dockerInfo.CgroupDriver
+	// skipping cgroup driver checks for Windows
+	if runtime.GOOS == "linux" {
+		// NOTE: cgroup driver is only detectable in docker 1.11+
+		cgroupDriver := defaultCgroupDriver
+		dockerInfo, err := ds.client.Info()
+		klog.Infof("Docker Info: %+v", dockerInfo)
+		if err != nil {
+			klog.Errorf("Failed to execute Info() call to the Docker client: %v", err)
+			klog.Warningf("Falling back to use the default driver: %q", cgroupDriver)
+		} else if len(dockerInfo.CgroupDriver) == 0 {
+			klog.Warningf("No cgroup driver is set in Docker")
+			klog.Warningf("Falling back to use the default driver: %q", cgroupDriver)
+		} else {
+			cgroupDriver = dockerInfo.CgroupDriver
+		}
+		if len(kubeCgroupDriver) != 0 && kubeCgroupDriver != cgroupDriver {
+			return nil, fmt.Errorf("misconfiguration: kubelet cgroup driver: %q is different from docker cgroup driver: %q", kubeCgroupDriver, cgroupDriver)
+		}
+		klog.Infof("Setting cgroupDriver to %s", cgroupDriver)
+		ds.cgroupDriver = cgroupDriver
 	}
-	if len(kubeCgroupDriver) != 0 && kubeCgroupDriver != cgroupDriver {
-		return nil, fmt.Errorf("misconfiguration: kubelet cgroup driver: %q is different from docker cgroup driver: %q", kubeCgroupDriver, cgroupDriver)
-	}
-	klog.Infof("Setting cgroupDriver to %s", cgroupDriver)
-	ds.cgroupDriver = cgroupDriver
+
 	ds.versionCache = cache.NewObjectCache(
 		func() (interface{}, error) {
 			return ds.getDockerVersion()
@@ -306,15 +311,13 @@ type dockerService struct {
 	// version checking for some operations. Use this cache to avoid querying
 	// the docker daemon every time we need to do such checks.
 	versionCache *cache.ObjectCache
-	// startLocalStreamingServer indicates whether dockershim should start a
-	// streaming server on localhost.
-	startLocalStreamingServer bool
 
 	// containerCleanupInfos maps container IDs to the `containerCleanupInfo` structs
 	// needed to clean up after containers have been removed.
 	// (see `applyPlatformSpecificDockerConfig` and `performPlatformSpecificContainerCleanup`
 	// methods for more info).
 	containerCleanupInfos map[string]*containerCleanupInfo
+	cleanupInfosLock      sync.RWMutex
 }
 
 // TODO: handle context.
@@ -407,19 +410,17 @@ func (ds *dockerService) GetPodPortMappings(podSandboxID string) ([]*hostport.Po
 func (ds *dockerService) Start() error {
 	ds.initCleanup()
 
-	// Initialize the legacy cleanup flag.
-	if ds.startLocalStreamingServer {
-		go func() {
-			if err := ds.streamingServer.Start(true); err != nil {
-				klog.Fatalf("Streaming server stopped unexpectedly: %v", err)
-			}
-		}()
-	}
+	go func() {
+		if err := ds.streamingServer.Start(true); err != nil {
+			klog.Fatalf("Streaming server stopped unexpectedly: %v", err)
+		}
+	}()
+
 	return ds.containerManager.Start()
 }
 
 // initCleanup is responsible for cleaning up any crufts left by previous
-// runs. If there are any errros, it simply logs them.
+// runs. If there are any errors, it simply logs them.
 func (ds *dockerService) initCleanup() {
 	errors := ds.platformSpecificContainerInitCleanup()
 

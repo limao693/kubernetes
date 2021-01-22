@@ -20,9 +20,9 @@ import (
 	"errors"
 	"strconv"
 
-	"k8s.io/kubernetes/pkg/util/mount"
-
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
+	"k8s.io/kubernetes/pkg/volume"
+	utilexec "k8s.io/utils/exec"
 
 	siotypes "github.com/thecodeteam/goscaleio/types/v1"
 )
@@ -30,10 +30,11 @@ import (
 type sioMgr struct {
 	client     sioInterface
 	configData map[string]string
-	exec       mount.Exec
+	exec       utilexec.Interface
+	host       volume.VolumeHost
 }
 
-func newSioMgr(configs map[string]string, exec mount.Exec) (*sioMgr, error) {
+func newSioMgr(configs map[string]string, host volume.VolumeHost, exec utilexec.Interface) (*sioMgr, error) {
 	if configs == nil {
 		return nil, errors.New("missing configuration data")
 	}
@@ -42,7 +43,7 @@ func newSioMgr(configs map[string]string, exec mount.Exec) (*sioMgr, error) {
 	configs[confKey.sdcRootPath] = defaultString(configs[confKey.sdcRootPath], sdcRootPath)
 	configs[confKey.storageMode] = defaultString(configs[confKey.storageMode], "ThinProvisioned")
 
-	mgr := &sioMgr{configData: configs, exec: exec}
+	mgr := &sioMgr{configData: configs, host: host, exec: exec}
 	return mgr, nil
 }
 
@@ -62,7 +63,7 @@ func (m *sioMgr) getClient() (sioInterface, error) {
 		certsEnabled := b
 
 		klog.V(4).Info(log("creating new client for gateway %s", gateway))
-		client, err := newSioClient(gateway, username, password, certsEnabled, m.exec)
+		client, err := newSioClient(gateway, username, password, certsEnabled, m.exec, m.host.GetFilteredDialOptions())
 		if err != nil {
 			klog.Error(log("failed to create scaleio client: %v", err))
 			return nil, err

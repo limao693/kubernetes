@@ -20,17 +20,16 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/go-openapi/spec"
-
 	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
 	apiextensionsfuzzer "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/fuzzer"
-	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/apitesting/fuzzer"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/json"
 	"k8s.io/apimachinery/pkg/util/sets"
+	kubeopenapispec "k8s.io/kube-openapi/pkg/validation/spec"
 )
 
 // TestRoundTrip checks the conversion to go-openapi types.
@@ -43,7 +42,7 @@ func TestRoundTrip(t *testing.T) {
 	if err := apiextensions.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	if err := apiextensionsv1beta1.AddToScheme(scheme); err != nil {
+	if err := apiextensionsv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 
@@ -58,7 +57,7 @@ func TestRoundTrip(t *testing.T) {
 		f.Fuzz(internal)
 
 		// internal -> go-openapi
-		openAPITypes := &spec.Schema{}
+		openAPITypes := &kubeopenapispec.Schema{}
 		if err := ConvertJSONSchemaProps(internal, openAPITypes); err != nil {
 			t.Fatal(err)
 		}
@@ -81,7 +80,7 @@ func TestRoundTrip(t *testing.T) {
 		}
 
 		// JSON -> external
-		external := &apiextensionsv1beta1.JSONSchemaProps{}
+		external := &apiextensionsv1.JSONSchemaProps{}
 		if err := json.Unmarshal(openAPIJSON, external); err != nil {
 			t.Fatal(err)
 		}
@@ -262,22 +261,22 @@ func TestValidateCustomResource(t *testing.T) {
 			},
 			failingObjects: []failingObject{
 				{object: map[string]interface{}{"field": true}, expectErrs: []string{
-					`: Invalid value: "": "field" must validate at least one schema (anyOf)`,
+					`<nil>: Invalid value: "": "field" must validate at least one schema (anyOf)`,
 					`field: Invalid value: "boolean": field in body must be of type integer,string: "boolean"`,
 					`field: Invalid value: "boolean": field in body must be of type integer: "boolean"`,
 				}},
 				{object: map[string]interface{}{"field": 1.2}, expectErrs: []string{
-					`: Invalid value: "": "field" must validate at least one schema (anyOf)`,
+					`<nil>: Invalid value: "": "field" must validate at least one schema (anyOf)`,
 					`field: Invalid value: "number": field in body must be of type integer,string: "number"`,
 					`field: Invalid value: "number": field in body must be of type integer: "number"`,
 				}},
 				{object: map[string]interface{}{"field": map[string]interface{}{}}, expectErrs: []string{
-					`: Invalid value: "": "field" must validate at least one schema (anyOf)`,
+					`<nil>: Invalid value: "": "field" must validate at least one schema (anyOf)`,
 					`field: Invalid value: "object": field in body must be of type integer,string: "object"`,
 					`field: Invalid value: "object": field in body must be of type integer: "object"`,
 				}},
 				{object: map[string]interface{}{"field": []interface{}{}}, expectErrs: []string{
-					`: Invalid value: "": "field" must validate at least one schema (anyOf)`,
+					`<nil>: Invalid value: "": "field" must validate at least one schema (anyOf)`,
 					`field: Invalid value: "array": field in body must be of type integer,string: "array"`,
 					`field: Invalid value: "array": field in body must be of type integer: "array"`,
 				}},
@@ -308,26 +307,26 @@ func TestValidateCustomResource(t *testing.T) {
 			},
 			failingObjects: []failingObject{
 				{object: map[string]interface{}{"field": true}, expectErrs: []string{
-					`: Invalid value: "": "field" must validate all the schemas (allOf). None validated`,
-					`: Invalid value: "": "field" must validate at least one schema (anyOf)`,
+					`<nil>: Invalid value: "": "field" must validate all the schemas (allOf). None validated`,
+					`<nil>: Invalid value: "": "field" must validate at least one schema (anyOf)`,
 					`field: Invalid value: "boolean": field in body must be of type integer,string: "boolean"`,
 					`field: Invalid value: "boolean": field in body must be of type integer: "boolean"`,
 				}},
 				{object: map[string]interface{}{"field": 1.2}, expectErrs: []string{
-					`: Invalid value: "": "field" must validate all the schemas (allOf). None validated`,
-					`: Invalid value: "": "field" must validate at least one schema (anyOf)`,
+					`<nil>: Invalid value: "": "field" must validate all the schemas (allOf). None validated`,
+					`<nil>: Invalid value: "": "field" must validate at least one schema (anyOf)`,
 					`field: Invalid value: "number": field in body must be of type integer,string: "number"`,
 					`field: Invalid value: "number": field in body must be of type integer: "number"`,
 				}},
 				{object: map[string]interface{}{"field": map[string]interface{}{}}, expectErrs: []string{
-					`: Invalid value: "": "field" must validate all the schemas (allOf). None validated`,
-					`: Invalid value: "": "field" must validate at least one schema (anyOf)`,
+					`<nil>: Invalid value: "": "field" must validate all the schemas (allOf). None validated`,
+					`<nil>: Invalid value: "": "field" must validate at least one schema (anyOf)`,
 					`field: Invalid value: "object": field in body must be of type integer,string: "object"`,
 					`field: Invalid value: "object": field in body must be of type integer: "object"`,
 				}},
 				{object: map[string]interface{}{"field": []interface{}{}}, expectErrs: []string{
-					`: Invalid value: "": "field" must validate all the schemas (allOf). None validated`,
-					`: Invalid value: "": "field" must validate at least one schema (anyOf)`,
+					`<nil>: Invalid value: "": "field" must validate all the schemas (allOf). None validated`,
+					`<nil>: Invalid value: "": "field" must validate at least one schema (anyOf)`,
 					`field: Invalid value: "array": field in body must be of type integer,string: "array"`,
 					`field: Invalid value: "array": field in body must be of type integer: "array"`,
 				}},
@@ -343,7 +342,7 @@ func TestValidateCustomResource(t *testing.T) {
 				},
 			},
 			failingObjects: []failingObject{
-				{object: map[string]interface{}{"field": "foo"}, expectErrs: []string{"field: Invalid value: \"\": field in body should match '+, but pattern is invalid: error parsing regexp: missing argument to repetition operator: `+`'"}},
+				{object: map[string]interface{}{"field": "foo"}, expectErrs: []string{"field: Invalid value: \"foo\": field in body should match '+, but pattern is invalid: error parsing regexp: missing argument to repetition operator: `+`'"}},
 			},
 		},
 		{name: "required field",

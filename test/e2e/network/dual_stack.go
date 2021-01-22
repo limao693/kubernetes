@@ -17,8 +17,11 @@ limitations under the License.
 package network
 
 import (
+	"context"
 	"fmt"
 	"net"
+	"strings"
+	"time"
 
 	"github.com/onsi/ginkgo"
 	"github.com/onsi/gomega"
@@ -26,9 +29,11 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
-	e2edeploy "k8s.io/kubernetes/test/e2e/framework/deployment"
+	e2edeployment "k8s.io/kubernetes/test/e2e/framework/deployment"
+	e2enetwork "k8s.io/kubernetes/test/e2e/framework/network"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2eservice "k8s.io/kubernetes/test/e2e/framework/service"
 	imageutils "k8s.io/kubernetes/test/utils/image"
@@ -58,7 +63,7 @@ var _ = SIGDescribe("[Feature:IPv6DualStackAlphaFeature] [LinuxOnly]", func() {
 
 			framework.ExpectEqual(len(internalIPs), 2)
 			// assert 2 ips belong to different families
-			framework.ExpectEqual(isIPv4(internalIPs[0]) != isIPv4(internalIPs[1]), true)
+			framework.ExpectEqual(netutils.IsIPv4String(internalIPs[0]) != netutils.IsIPv4String(internalIPs[1]), true)
 		}
 	})
 
@@ -72,7 +77,7 @@ var _ = SIGDescribe("[Feature:IPv6DualStackAlphaFeature] [LinuxOnly]", func() {
 			// assert podCIDR is same as podCIDRs[0]
 			framework.ExpectEqual(node.Spec.PodCIDR, node.Spec.PodCIDRs[0])
 			// assert one is ipv4 and other is ipv6
-			framework.ExpectEqual(isIPv4CIDR(node.Spec.PodCIDRs[0]) != isIPv4CIDR(node.Spec.PodCIDRs[1]), true)
+			framework.ExpectEqual(netutils.IsIPv4CIDRString(node.Spec.PodCIDRs[0]) != netutils.IsIPv4CIDRString(node.Spec.PodCIDRs[1]), true)
 		}
 	})
 
@@ -88,18 +93,14 @@ var _ = SIGDescribe("[Feature:IPv6DualStackAlphaFeature] [LinuxOnly]", func() {
 				Containers: []v1.Container{
 					{
 						Name:  "dualstack-pod-ips",
-						Image: imageutils.GetE2EImage(imageutils.BusyBox),
+						Image: imageutils.GetE2EImage(imageutils.Agnhost),
 					},
 				},
 			},
 		}
 
 		ginkgo.By("submitting the pod to kubernetes")
-		podClient.CreateSync(pod)
-		framework.ExpectNoError(f.WaitForPodRunning(pod.Name))
-
-		p, err := podClient.Get(pod.Name, metav1.GetOptions{})
-		framework.ExpectNoError(err, "Failed to get pod %q", pod.Name)
+		p := podClient.CreateSync(pod)
 
 		gomega.Expect(p.Status.PodIP).ShouldNot(gomega.BeEquivalentTo(""))
 		gomega.Expect(p.Status.PodIPs).ShouldNot(gomega.BeNil())
@@ -109,10 +110,10 @@ var _ = SIGDescribe("[Feature:IPv6DualStackAlphaFeature] [LinuxOnly]", func() {
 		// validate first ip in PodIPs is same as PodIP
 		framework.ExpectEqual(p.Status.PodIP, p.Status.PodIPs[0].IP)
 		// assert 2 pod ips belong to different families
-		framework.ExpectEqual(isIPv4(p.Status.PodIPs[0].IP) != isIPv4(p.Status.PodIPs[1].IP), true)
+		framework.ExpectEqual(netutils.IsIPv4String(p.Status.PodIPs[0].IP) != netutils.IsIPv4String(p.Status.PodIPs[1].IP), true)
 
 		ginkgo.By("deleting the pod")
-		err = podClient.Delete(pod.Name, metav1.NewDeleteOptions(30))
+		err := podClient.Delete(context.TODO(), pod.Name, *metav1.NewDeleteOptions(30))
 		framework.ExpectNoError(err, "failed to delete pod")
 	})
 
@@ -132,12 +133,13 @@ var _ = SIGDescribe("[Feature:IPv6DualStackAlphaFeature] [LinuxOnly]", func() {
 
 		replicas := int32(len(nodeList.Items))
 
-		serverDeploymentSpec := e2edeploy.NewDeployment(serverDeploymentName,
+		serverDeploymentSpec := e2edeployment.NewDeployment(serverDeploymentName,
 			replicas,
 			map[string]string{"test": "dual-stack-server"},
 			"dualstack-test-server",
-			imageutils.GetE2EImage(imageutils.TestWebserver),
+			imageutils.GetE2EImage(imageutils.Agnhost),
 			appsv1.RollingUpdateDeploymentStrategyType)
+		serverDeploymentSpec.Spec.Template.Spec.Containers[0].Args = []string{"test-webserver"}
 
 		// to ensure all the pods land on different nodes and we can thereby
 		// validate connectivity across all nodes.
@@ -160,7 +162,7 @@ var _ = SIGDescribe("[Feature:IPv6DualStackAlphaFeature] [LinuxOnly]", func() {
 			},
 		}
 
-		clientDeploymentSpec := e2edeploy.NewDeployment(clientDeploymentName,
+		clientDeploymentSpec := e2edeployment.NewDeployment(clientDeploymentName,
 			replicas,
 			map[string]string{"test": "dual-stack-client"},
 			"dualstack-test-client",
@@ -187,37 +189,32 @@ var _ = SIGDescribe("[Feature:IPv6DualStackAlphaFeature] [LinuxOnly]", func() {
 			},
 		}
 
-		serverDeployment, err := cs.AppsV1().Deployments(f.Namespace.Name).Create(serverDeploymentSpec)
+		serverDeployment, err := cs.AppsV1().Deployments(f.Namespace.Name).Create(context.TODO(), serverDeploymentSpec, metav1.CreateOptions{})
 		framework.ExpectNoError(err)
 
-		clientDeployment, err := cs.AppsV1().Deployments(f.Namespace.Name).Create(clientDeploymentSpec)
+		clientDeployment, err := cs.AppsV1().Deployments(f.Namespace.Name).Create(context.TODO(), clientDeploymentSpec, metav1.CreateOptions{})
 		framework.ExpectNoError(err)
 
-		err = e2edeploy.WaitForDeploymentComplete(cs, serverDeployment)
+		err = e2edeployment.WaitForDeploymentComplete(cs, serverDeployment)
 		framework.ExpectNoError(err)
-		err = e2edeploy.WaitForDeploymentComplete(cs, clientDeployment)
-		framework.ExpectNoError(err)
-
-		serverPods, err := e2edeploy.GetPodsForDeployment(cs, serverDeployment)
+		err = e2edeployment.WaitForDeploymentComplete(cs, clientDeployment)
 		framework.ExpectNoError(err)
 
-		clientPods, err := e2edeploy.GetPodsForDeployment(cs, clientDeployment)
+		serverPods, err := e2edeployment.GetPodsForDeployment(cs, serverDeployment)
+		framework.ExpectNoError(err)
+
+		clientPods, err := e2edeployment.GetPodsForDeployment(cs, clientDeployment)
 		framework.ExpectNoError(err)
 
 		assertNetworkConnectivity(f, *serverPods, *clientPods, "dualstack-test-client", "80")
 	})
 
-	ginkgo.It("should create service with cluster ip from primary service range [Feature:IPv6DualStackAlphaFeature:Phase2]", func() {
+	ginkgo.It("should create a single stack service with cluster ip from primary service range [Feature:IPv6DualStackAlphaFeature:Phase2]", func() {
 		serviceName := "defaultclusterip"
 		ns := f.Namespace.Name
 		jig := e2eservice.NewTestJig(cs, ns, serviceName)
 
-		defaultIPFamily := v1.IPv4Protocol
-		if framework.TestContext.ClusterIsIPv6() {
-			defaultIPFamily = v1.IPv6Protocol
-		}
-
-		t := e2eservice.NewServerTest(cs, ns, serviceName)
+		t := NewServerTest(cs, ns, serviceName)
 		defer func() {
 			defer ginkgo.GinkgoRecover()
 			if errs := t.Cleanup(); len(errs) != 0 {
@@ -225,8 +222,8 @@ var _ = SIGDescribe("[Feature:IPv6DualStackAlphaFeature] [LinuxOnly]", func() {
 			}
 		}()
 
-		ginkgo.By("creating service " + ns + "/" + serviceName + " with Service.Spec.IPFamily not set")
-		service := createService(t.ServiceName, t.Namespace, t.Labels, nil)
+		ginkgo.By("creating service " + ns + "/" + serviceName + " with Service.Spec.IPFamilies not set nil policy")
+		service := createService(t.ServiceName, t.Namespace, t.Labels, nil, nil)
 
 		jig.Labels = t.Labels
 		err := jig.CreateServicePods(2)
@@ -236,25 +233,36 @@ var _ = SIGDescribe("[Feature:IPv6DualStackAlphaFeature] [LinuxOnly]", func() {
 
 		validateNumOfServicePorts(svc, 2)
 
+		expectedPolicy := v1.IPFamilyPolicySingleStack
+		expectedFamilies := []v1.IPFamily{v1.IPv4Protocol}
+		if framework.TestContext.ClusterIsIPv6() {
+			expectedFamilies = []v1.IPFamily{v1.IPv6Protocol}
+		}
+
 		// check the spec has been set to default ip family
-		validateServiceAndClusterIPFamily(svc, defaultIPFamily)
+		validateServiceAndClusterIPFamily(svc, expectedFamilies, &expectedPolicy)
 
 		// ensure endpoint belong to same ipfamily as service
-		endpoint, err := cs.CoreV1().Endpoints(svc.Namespace).Get(svc.Name, metav1.GetOptions{})
-		if err != nil {
+		if err := wait.PollImmediate(500*time.Millisecond, 10*time.Second, func() (bool, error) {
+			endpoint, err := cs.CoreV1().Endpoints(svc.Namespace).Get(context.TODO(), svc.Name, metav1.GetOptions{})
+			if err != nil {
+				return false, nil
+			}
+			validateEndpointsBelongToIPFamily(svc, endpoint, expectedFamilies[0] /*endpoint controller works on primary ip*/)
+
+			return true, nil
+		}); err != nil {
 			framework.Failf("Get endpoints for service %s/%s failed (%s)", svc.Namespace, svc.Name, err)
 		}
-		validateEndpointsBelongToIPFamily(svc, endpoint, defaultIPFamily)
 	})
 
 	ginkgo.It("should create service with ipv4 cluster ip [Feature:IPv6DualStackAlphaFeature:Phase2]", func() {
 		serviceName := "ipv4clusterip"
 		ns := f.Namespace.Name
-		ipv4 := v1.IPv4Protocol
 
 		jig := e2eservice.NewTestJig(cs, ns, serviceName)
 
-		t := e2eservice.NewServerTest(cs, ns, serviceName)
+		t := NewServerTest(cs, ns, serviceName)
 		defer func() {
 			defer ginkgo.GinkgoRecover()
 			if errs := t.Cleanup(); len(errs) != 0 {
@@ -263,7 +271,11 @@ var _ = SIGDescribe("[Feature:IPv6DualStackAlphaFeature] [LinuxOnly]", func() {
 		}()
 
 		ginkgo.By("creating service " + ns + "/" + serviceName + " with Service.Spec.IPFamily IPv4" + ns)
-		service := createService(t.ServiceName, t.Namespace, t.Labels, &ipv4)
+
+		expectedPolicy := v1.IPFamilyPolicySingleStack
+		expectedFamilies := []v1.IPFamily{v1.IPv4Protocol}
+
+		service := createService(t.ServiceName, t.Namespace, t.Labels, nil, expectedFamilies)
 
 		jig.Labels = t.Labels
 		err := jig.CreateServicePods(2)
@@ -274,14 +286,19 @@ var _ = SIGDescribe("[Feature:IPv6DualStackAlphaFeature] [LinuxOnly]", func() {
 		validateNumOfServicePorts(svc, 2)
 
 		// check the spec has been set to IPv4 and cluster ip belong to IPv4 family
-		validateServiceAndClusterIPFamily(svc, ipv4)
+		validateServiceAndClusterIPFamily(svc, expectedFamilies, &expectedPolicy)
 
 		// ensure endpoints belong to same ipfamily as service
-		endpoint, err := cs.CoreV1().Endpoints(svc.Namespace).Get(svc.Name, metav1.GetOptions{})
-		if err != nil {
+		if err := wait.PollImmediate(500*time.Millisecond, 10*time.Second, func() (bool, error) {
+			endpoint, err := cs.CoreV1().Endpoints(svc.Namespace).Get(context.TODO(), svc.Name, metav1.GetOptions{})
+			if err != nil {
+				return false, nil
+			}
+			validateEndpointsBelongToIPFamily(svc, endpoint, expectedFamilies[0] /* endpoint controller operates on primary ip */)
+			return true, nil
+		}); err != nil {
 			framework.Failf("Get endpoints for service %s/%s failed (%s)", svc.Namespace, svc.Name, err)
 		}
-		validateEndpointsBelongToIPFamily(svc, endpoint, ipv4)
 	})
 
 	ginkgo.It("should create service with ipv6 cluster ip [Feature:IPv6DualStackAlphaFeature:Phase2]", func() {
@@ -291,7 +308,7 @@ var _ = SIGDescribe("[Feature:IPv6DualStackAlphaFeature] [LinuxOnly]", func() {
 
 		jig := e2eservice.NewTestJig(cs, ns, serviceName)
 
-		t := e2eservice.NewServerTest(cs, ns, serviceName)
+		t := NewServerTest(cs, ns, serviceName)
 		defer func() {
 			defer ginkgo.GinkgoRecover()
 			if errs := t.Cleanup(); len(errs) != 0 {
@@ -300,7 +317,10 @@ var _ = SIGDescribe("[Feature:IPv6DualStackAlphaFeature] [LinuxOnly]", func() {
 		}()
 
 		ginkgo.By("creating service " + ns + "/" + serviceName + " with Service.Spec.IPFamily IPv6" + ns)
-		service := createService(t.ServiceName, t.Namespace, t.Labels, &ipv6)
+		expectedPolicy := v1.IPFamilyPolicySingleStack
+		expectedFamilies := []v1.IPFamily{v1.IPv6Protocol}
+
+		service := createService(t.ServiceName, t.Namespace, t.Labels, nil, expectedFamilies)
 
 		jig.Labels = t.Labels
 		err := jig.CreateServicePods(2)
@@ -311,14 +331,252 @@ var _ = SIGDescribe("[Feature:IPv6DualStackAlphaFeature] [LinuxOnly]", func() {
 		validateNumOfServicePorts(svc, 2)
 
 		// check the spec has been set to IPv6 and cluster ip belongs to IPv6 family
-		validateServiceAndClusterIPFamily(svc, ipv6)
+		validateServiceAndClusterIPFamily(svc, expectedFamilies, &expectedPolicy)
 
 		// ensure endpoints belong to same ipfamily as service
-		endpoint, err := cs.CoreV1().Endpoints(svc.Namespace).Get(svc.Name, metav1.GetOptions{})
-		if err != nil {
+		if err := wait.PollImmediate(500*time.Millisecond, 10*time.Second, func() (bool, error) {
+			endpoint, err := cs.CoreV1().Endpoints(svc.Namespace).Get(context.TODO(), svc.Name, metav1.GetOptions{})
+			if err != nil {
+				return false, nil
+			}
+			validateEndpointsBelongToIPFamily(svc, endpoint, ipv6)
+			return true, nil
+		}); err != nil {
 			framework.Failf("Get endpoints for service %s/%s failed (%s)", svc.Namespace, svc.Name, err)
 		}
-		validateEndpointsBelongToIPFamily(svc, endpoint, ipv6)
+	})
+
+	ginkgo.It("should create service with ipv4,v6 cluster ip [Feature:IPv6DualStackAlphaFeature:Phase2]", func() {
+		serviceName := "ipv4ipv6clusterip"
+		ns := f.Namespace.Name
+
+		jig := e2eservice.NewTestJig(cs, ns, serviceName)
+
+		t := NewServerTest(cs, ns, serviceName)
+		defer func() {
+			defer ginkgo.GinkgoRecover()
+			if errs := t.Cleanup(); len(errs) != 0 {
+				framework.Failf("errors in cleanup: %v", errs)
+			}
+		}()
+
+		ginkgo.By("creating service " + ns + "/" + serviceName + " with Service.Spec.IPFamily IPv4, IPv6" + ns)
+
+		expectedPolicy := v1.IPFamilyPolicyRequireDualStack
+		expectedFamilies := []v1.IPFamily{v1.IPv4Protocol, v1.IPv6Protocol}
+
+		service := createService(t.ServiceName, t.Namespace, t.Labels, nil, expectedFamilies)
+
+		jig.Labels = t.Labels
+		err := jig.CreateServicePods(2)
+		framework.ExpectNoError(err)
+		svc, err := t.CreateService(service)
+		framework.ExpectNoError(err, "failed to create service: %s in namespace: %s", serviceName, ns)
+
+		validateNumOfServicePorts(svc, 2)
+
+		// check the spec has been set to IPv4 and cluster ip belong to IPv4 family
+		validateServiceAndClusterIPFamily(svc, expectedFamilies, &expectedPolicy)
+
+		// ensure endpoints belong to same ipfamily as service
+		if err := wait.PollImmediate(500*time.Millisecond, 10*time.Second, func() (bool, error) {
+			endpoint, err := cs.CoreV1().Endpoints(svc.Namespace).Get(context.TODO(), svc.Name, metav1.GetOptions{})
+			if err != nil {
+				return false, nil
+			}
+			validateEndpointsBelongToIPFamily(svc, endpoint, expectedFamilies[0] /* endpoint controller operates on primary ip */)
+			return true, nil
+		}); err != nil {
+			framework.Failf("Get endpoints for service %s/%s failed (%s)", svc.Namespace, svc.Name, err)
+		}
+	})
+
+	ginkgo.It("should create service with ipv6,v4 cluster ip [Feature:IPv6DualStackAlphaFeature:Phase2]", func() {
+		serviceName := "ipv6ipv4clusterip"
+		ns := f.Namespace.Name
+
+		jig := e2eservice.NewTestJig(cs, ns, serviceName)
+
+		t := NewServerTest(cs, ns, serviceName)
+		defer func() {
+			defer ginkgo.GinkgoRecover()
+			if errs := t.Cleanup(); len(errs) != 0 {
+				framework.Failf("errors in cleanup: %v", errs)
+			}
+		}()
+
+		ginkgo.By("creating service " + ns + "/" + serviceName + " with Service.Spec.IPFamily IPv4, IPv6" + ns)
+
+		expectedPolicy := v1.IPFamilyPolicyRequireDualStack
+		expectedFamilies := []v1.IPFamily{v1.IPv6Protocol, v1.IPv4Protocol}
+
+		service := createService(t.ServiceName, t.Namespace, t.Labels, nil, expectedFamilies)
+
+		jig.Labels = t.Labels
+		err := jig.CreateServicePods(2)
+		framework.ExpectNoError(err)
+		svc, err := t.CreateService(service)
+		framework.ExpectNoError(err, "failed to create service: %s in namespace: %s", serviceName, ns)
+
+		validateNumOfServicePorts(svc, 2)
+
+		// check the spec has been set to IPv4 and cluster ip belong to IPv4 family
+		validateServiceAndClusterIPFamily(svc, expectedFamilies, &expectedPolicy)
+
+		// ensure endpoints belong to same ipfamily as service
+		if err := wait.PollImmediate(500*time.Millisecond, 10*time.Second, func() (bool, error) {
+			endpoint, err := cs.CoreV1().Endpoints(svc.Namespace).Get(context.TODO(), svc.Name, metav1.GetOptions{})
+			if err != nil {
+				return false, nil
+			}
+			validateEndpointsBelongToIPFamily(svc, endpoint, expectedFamilies[0] /* endpoint controller operates on primary ip */)
+			return true, nil
+		}); err != nil {
+			framework.Failf("Get endpoints for service %s/%s failed (%s)", svc.Namespace, svc.Name, err)
+		}
+	})
+	// TODO (khenidak add slice validation logic, since endpoint controller only operates
+	// on primary ClusterIP
+
+	// Service Granular Checks as in k8s.io/kubernetes/test/e2e/network/networking.go
+	// but using the secondary IP, so we run the same tests for each ClusterIP family
+	ginkgo.Describe("Granular Checks: Services Secondary IP Family", func() {
+
+		ginkgo.It("should function for pod-Service: http", func() {
+			config := e2enetwork.NewNetworkingTestConfig(f, e2enetwork.EnableDualStack)
+			ginkgo.By(fmt.Sprintf("dialing(http) %v --> %v:%v (config.clusterIP)", config.TestContainerPod.Name, config.SecondaryClusterIP, e2enetwork.ClusterHTTPPort))
+			config.DialFromTestContainer("http", config.SecondaryClusterIP, e2enetwork.ClusterHTTPPort, config.MaxTries, 0, config.EndpointHostnames())
+
+			ginkgo.By(fmt.Sprintf("dialing(http) %v --> %v:%v (nodeIP)", config.TestContainerPod.Name, config.SecondaryNodeIP, config.NodeHTTPPort))
+			config.DialFromTestContainer("http", config.SecondaryNodeIP, config.NodeHTTPPort, config.MaxTries, 0, config.EndpointHostnames())
+		})
+
+		ginkgo.It("should function for pod-Service: udp", func() {
+			config := e2enetwork.NewNetworkingTestConfig(f, e2enetwork.EnableDualStack)
+			ginkgo.By(fmt.Sprintf("dialing(udp) %v --> %v:%v (config.clusterIP)", config.TestContainerPod.Name, config.SecondaryClusterIP, e2enetwork.ClusterUDPPort))
+			config.DialFromTestContainer("udp", config.SecondaryClusterIP, e2enetwork.ClusterUDPPort, config.MaxTries, 0, config.EndpointHostnames())
+
+			ginkgo.By(fmt.Sprintf("dialing(udp) %v --> %v:%v (nodeIP)", config.TestContainerPod.Name, config.SecondaryNodeIP, config.NodeUDPPort))
+			config.DialFromTestContainer("udp", config.SecondaryNodeIP, config.NodeUDPPort, config.MaxTries, 0, config.EndpointHostnames())
+		})
+
+		// [Disruptive] because it conflicts with tests that call CheckSCTPModuleLoadedOnNodes
+		ginkgo.It("should function for pod-Service: sctp [Feature:SCTPConnectivity][Disruptive]", func() {
+			config := e2enetwork.NewNetworkingTestConfig(f, e2enetwork.EnableDualStack, e2enetwork.EnableSCTP)
+			ginkgo.By(fmt.Sprintf("dialing(sctp) %v --> %v:%v (config.clusterIP)", config.TestContainerPod.Name, config.SecondaryClusterIP, e2enetwork.ClusterSCTPPort))
+			config.DialFromTestContainer("sctp", config.SecondaryClusterIP, e2enetwork.ClusterSCTPPort, config.MaxTries, 0, config.EndpointHostnames())
+
+			ginkgo.By(fmt.Sprintf("dialing(sctp) %v --> %v:%v (nodeIP)", config.TestContainerPod.Name, config.SecondaryNodeIP, config.NodeSCTPPort))
+			config.DialFromTestContainer("sctp", config.SecondaryNodeIP, config.NodeSCTPPort, config.MaxTries, 0, config.EndpointHostnames())
+		})
+
+		ginkgo.It("should function for node-Service: http", func() {
+			config := e2enetwork.NewNetworkingTestConfig(f, e2enetwork.EnableDualStack, e2enetwork.UseHostNetwork)
+			ginkgo.By(fmt.Sprintf("dialing(http) %v (node) --> %v:%v (config.clusterIP)", config.SecondaryNodeIP, config.SecondaryClusterIP, e2enetwork.ClusterHTTPPort))
+			config.DialFromNode("http", config.SecondaryClusterIP, e2enetwork.ClusterHTTPPort, config.MaxTries, 0, config.EndpointHostnames())
+
+			ginkgo.By(fmt.Sprintf("dialing(http) %v (node) --> %v:%v (nodeIP)", config.SecondaryNodeIP, config.SecondaryNodeIP, config.NodeHTTPPort))
+			config.DialFromNode("http", config.SecondaryNodeIP, config.NodeHTTPPort, config.MaxTries, 0, config.EndpointHostnames())
+		})
+
+		ginkgo.It("should function for node-Service: udp", func() {
+			config := e2enetwork.NewNetworkingTestConfig(f, e2enetwork.EnableDualStack, e2enetwork.UseHostNetwork)
+			ginkgo.By(fmt.Sprintf("dialing(udp) %v (node) --> %v:%v (config.clusterIP)", config.SecondaryNodeIP, config.SecondaryClusterIP, e2enetwork.ClusterUDPPort))
+			config.DialFromNode("udp", config.SecondaryClusterIP, e2enetwork.ClusterUDPPort, config.MaxTries, 0, config.EndpointHostnames())
+
+			ginkgo.By(fmt.Sprintf("dialing(udp) %v (node) --> %v:%v (nodeIP)", config.SecondaryNodeIP, config.SecondaryNodeIP, config.NodeUDPPort))
+			config.DialFromNode("udp", config.SecondaryNodeIP, config.NodeUDPPort, config.MaxTries, 0, config.EndpointHostnames())
+		})
+
+		ginkgo.It("should function for endpoint-Service: http", func() {
+			config := e2enetwork.NewNetworkingTestConfig(f, e2enetwork.EnableDualStack)
+			ginkgo.By(fmt.Sprintf("dialing(http) %v (endpoint) --> %v:%v (config.clusterIP)", config.EndpointPods[0].Name, config.SecondaryClusterIP, e2enetwork.ClusterHTTPPort))
+			config.DialFromEndpointContainer("http", config.SecondaryClusterIP, e2enetwork.ClusterHTTPPort, config.MaxTries, 0, config.EndpointHostnames())
+
+			ginkgo.By(fmt.Sprintf("dialing(http) %v (endpoint) --> %v:%v (nodeIP)", config.EndpointPods[0].Name, config.SecondaryNodeIP, config.NodeHTTPPort))
+			config.DialFromEndpointContainer("http", config.SecondaryNodeIP, config.NodeHTTPPort, config.MaxTries, 0, config.EndpointHostnames())
+		})
+
+		ginkgo.It("should function for endpoint-Service: udp", func() {
+			config := e2enetwork.NewNetworkingTestConfig(f, e2enetwork.EnableDualStack)
+			ginkgo.By(fmt.Sprintf("dialing(udp) %v (endpoint) --> %v:%v (config.clusterIP)", config.EndpointPods[0].Name, config.SecondaryClusterIP, e2enetwork.ClusterUDPPort))
+			config.DialFromEndpointContainer("udp", config.SecondaryClusterIP, e2enetwork.ClusterUDPPort, config.MaxTries, 0, config.EndpointHostnames())
+
+			ginkgo.By(fmt.Sprintf("dialing(udp) %v (endpoint) --> %v:%v (nodeIP)", config.EndpointPods[0].Name, config.SecondaryNodeIP, config.NodeUDPPort))
+			config.DialFromEndpointContainer("udp", config.SecondaryNodeIP, config.NodeUDPPort, config.MaxTries, 0, config.EndpointHostnames())
+		})
+
+		ginkgo.It("should update endpoints: http", func() {
+			config := e2enetwork.NewNetworkingTestConfig(f, e2enetwork.EnableDualStack)
+			ginkgo.By(fmt.Sprintf("dialing(http) %v --> %v:%v (config.clusterIP)", config.TestContainerPod.Name, config.SecondaryClusterIP, e2enetwork.ClusterHTTPPort))
+			config.DialFromTestContainer("http", config.SecondaryClusterIP, e2enetwork.ClusterHTTPPort, config.MaxTries, 0, config.EndpointHostnames())
+
+			config.DeleteNetProxyPod()
+
+			ginkgo.By(fmt.Sprintf("dialing(http) %v --> %v:%v (config.clusterIP)", config.TestContainerPod.Name, config.SecondaryClusterIP, e2enetwork.ClusterHTTPPort))
+			config.DialFromTestContainer("http", config.SecondaryClusterIP, e2enetwork.ClusterHTTPPort, config.MaxTries, config.MaxTries, config.EndpointHostnames())
+		})
+
+		ginkgo.It("should update endpoints: udp", func() {
+			config := e2enetwork.NewNetworkingTestConfig(f, e2enetwork.EnableDualStack)
+			ginkgo.By(fmt.Sprintf("dialing(udp) %v --> %v:%v (config.clusterIP)", config.TestContainerPod.Name, config.SecondaryClusterIP, e2enetwork.ClusterUDPPort))
+			config.DialFromTestContainer("udp", config.SecondaryClusterIP, e2enetwork.ClusterUDPPort, config.MaxTries, 0, config.EndpointHostnames())
+
+			config.DeleteNetProxyPod()
+
+			ginkgo.By(fmt.Sprintf("dialing(udp) %v --> %v:%v (config.clusterIP)", config.TestContainerPod.Name, config.SecondaryClusterIP, e2enetwork.ClusterUDPPort))
+			config.DialFromTestContainer("udp", config.SecondaryClusterIP, e2enetwork.ClusterUDPPort, config.MaxTries, config.MaxTries, config.EndpointHostnames())
+		})
+
+		// [LinuxOnly]: Windows does not support session affinity.
+		ginkgo.It("should function for client IP based session affinity: http [LinuxOnly]", func() {
+			config := e2enetwork.NewNetworkingTestConfig(f, e2enetwork.EnableDualStack)
+			ginkgo.By(fmt.Sprintf("dialing(http) %v --> %v:%v", config.TestContainerPod.Name, config.SessionAffinityService.Spec.ClusterIPs[1], e2enetwork.ClusterHTTPPort))
+
+			// Check if number of endpoints returned are exactly one.
+			eps, err := config.GetEndpointsFromTestContainer("http", config.SessionAffinityService.Spec.ClusterIPs[1], e2enetwork.ClusterHTTPPort, e2enetwork.SessionAffinityChecks)
+			if err != nil {
+				framework.Failf("ginkgo.Failed to get endpoints from test container, error: %v", err)
+			}
+			if len(eps) == 0 {
+				framework.Failf("Unexpected no endpoints return")
+			}
+			if len(eps) > 1 {
+				framework.Failf("Unexpected endpoints return: %v, expect 1 endpoints", eps)
+			}
+		})
+
+		// [LinuxOnly]: Windows does not support session affinity.
+		ginkgo.It("should function for client IP based session affinity: udp [LinuxOnly]", func() {
+			config := e2enetwork.NewNetworkingTestConfig(f, e2enetwork.EnableDualStack)
+			ginkgo.By(fmt.Sprintf("dialing(udp) %v --> %v:%v", config.TestContainerPod.Name, config.SessionAffinityService.Spec.ClusterIPs[1], e2enetwork.ClusterUDPPort))
+
+			// Check if number of endpoints returned are exactly one.
+			eps, err := config.GetEndpointsFromTestContainer("udp", config.SessionAffinityService.Spec.ClusterIPs[1], e2enetwork.ClusterUDPPort, e2enetwork.SessionAffinityChecks)
+			if err != nil {
+				framework.Failf("ginkgo.Failed to get endpoints from test container, error: %v", err)
+			}
+			if len(eps) == 0 {
+				framework.Failf("Unexpected no endpoints return")
+			}
+			if len(eps) > 1 {
+				framework.Failf("Unexpected endpoints return: %v, expect 1 endpoints", eps)
+			}
+		})
+
+		ginkgo.It("should be able to handle large requests: http", func() {
+			config := e2enetwork.NewNetworkingTestConfig(f, e2enetwork.EnableDualStack)
+			ginkgo.By(fmt.Sprintf("dialing(http) %v --> %v:%v (config.clusterIP)", config.TestContainerPod.Name, config.SecondaryClusterIP, e2enetwork.ClusterHTTPPort))
+			message := strings.Repeat("42", 1000)
+			config.DialEchoFromTestContainer("http", config.SecondaryClusterIP, e2enetwork.ClusterHTTPPort, config.MaxTries, 0, message)
+		})
+
+		ginkgo.It("should be able to handle large requests: udp", func() {
+			config := e2enetwork.NewNetworkingTestConfig(f, e2enetwork.EnableDualStack)
+			ginkgo.By(fmt.Sprintf("dialing(udp) %v --> %v:%v (config.clusterIP)", config.TestContainerPod.Name, config.SecondaryClusterIP, e2enetwork.ClusterUDPPort))
+			message := "n" + strings.Repeat("o", 1999)
+			config.DialEchoFromTestContainer("udp", config.SecondaryClusterIP, e2enetwork.ClusterUDPPort, config.MaxTries, 0, message)
+		})
 	})
 })
 
@@ -328,17 +586,37 @@ func validateNumOfServicePorts(svc *v1.Service, expectedNumOfPorts int) {
 	}
 }
 
-func validateServiceAndClusterIPFamily(svc *v1.Service, expectedIPFamily v1.IPFamily) {
-	if svc.Spec.IPFamily == nil {
+func validateServiceAndClusterIPFamily(svc *v1.Service, expectedIPFamilies []v1.IPFamily, expectedPolicy *v1.IPFamilyPolicyType) {
+	if len(svc.Spec.IPFamilies) != len(expectedIPFamilies) {
 		framework.Failf("service ip family nil for service %s/%s", svc.Namespace, svc.Name)
 	}
-	if *svc.Spec.IPFamily != expectedIPFamily {
-		framework.Failf("ip family mismatch for service: %s/%s, expected: %s, actual: %s", svc.Namespace, svc.Name, expectedIPFamily, *svc.Spec.IPFamily)
+
+	for idx, family := range expectedIPFamilies {
+		if svc.Spec.IPFamilies[idx] != family {
+			framework.Failf("service %s/%s expected family %v at index[%v] got %v", svc.Namespace, svc.Name, family, idx, svc.Spec.IPFamilies[idx])
+		}
 	}
 
-	isIPv6ClusterIP := netutils.IsIPv6String(svc.Spec.ClusterIP)
-	if (expectedIPFamily == v1.IPv4Protocol && isIPv6ClusterIP) || (expectedIPFamily == v1.IPv6Protocol && !isIPv6ClusterIP) {
-		framework.Failf("got unexpected service ip %s, should belong to %s ip family", svc.Spec.ClusterIP, expectedIPFamily)
+	// validate ip assigned is from the family
+	if len(svc.Spec.ClusterIPs) != len(svc.Spec.IPFamilies) {
+		framework.Failf("service %s/%s assigned ips [%+v] does not match families [%+v]", svc.Namespace, svc.Name, svc.Spec.ClusterIPs, svc.Spec.IPFamilies)
+	}
+
+	for idx, family := range svc.Spec.IPFamilies {
+		if (family == v1.IPv6Protocol) != netutils.IsIPv6String(svc.Spec.ClusterIPs[idx]) {
+			framework.Failf("service %s/%s assigned ips at [%v]:%v does not match family:%v", svc.Namespace, svc.Name, idx, svc.Spec.ClusterIPs[idx], family)
+		}
+	}
+	// validate policy
+	if expectedPolicy == nil && svc.Spec.IPFamilyPolicy != nil {
+		framework.Failf("service %s/%s expected nil for IPFamilyPolicy", svc.Namespace, svc.Name)
+	}
+	if expectedPolicy != nil && svc.Spec.IPFamilyPolicy == nil {
+		framework.Failf("service %s/%s expected value %v for IPFamilyPolicy", svc.Namespace, svc.Name, expectedPolicy)
+	}
+
+	if expectedPolicy != nil && *(svc.Spec.IPFamilyPolicy) != *(expectedPolicy) {
+		framework.Failf("service %s/%s expected value %v for IPFamilyPolicy", svc.Namespace, svc.Name, expectedPolicy)
 	}
 }
 
@@ -348,7 +626,7 @@ func validateEndpointsBelongToIPFamily(svc *v1.Service, endpoint *v1.Endpoints, 
 	}
 	for _, ss := range endpoint.Subsets {
 		for _, e := range ss.Addresses {
-			if (expectedIPFamily == v1.IPv6Protocol && isIPv4(e.IP)) || (expectedIPFamily == v1.IPv4Protocol && netutils.IsIPv6String(e.IP)) {
+			if (expectedIPFamily == v1.IPv6Protocol) != netutils.IsIPv6String(e.IP) {
 				framework.Failf("service endpoint %s doesn't belong to %s ip family", e.IP, expectedIPFamily)
 			}
 		}
@@ -366,7 +644,7 @@ func assertNetworkConnectivity(f *framework.Framework, serverPods v1.PodList, cl
 		if pod.Status.PodIPs == nil || len(pod.Status.PodIPs) != 2 {
 			framework.Failf("PodIPs list not expected value, got %v", pod.Status.PodIPs)
 		}
-		if isIPv4(pod.Status.PodIPs[0].IP) == isIPv4(pod.Status.PodIPs[1].IP) {
+		if netutils.IsIPv4String(pod.Status.PodIPs[0].IP) == netutils.IsIPv4String(pod.Status.PodIPs[1].IP) {
 			framework.Failf("PodIPs should belong to different families, got %v", pod.Status.PodIPs)
 		}
 		serverIPs = append(serverIPs, pod.Status.PodIPs[0].IP, pod.Status.PodIPs[1].IP)
@@ -390,33 +668,18 @@ func checkNetworkConnectivity(ip, port string, timeout int) []string {
 	return cmd
 }
 
-// isIPv4 checks if the provided ip belongs to ipv4 family.
-// If ip belongs to ipv4 family, return true else it returns false
-// TODO (aramase) move this to https://github.com/kubernetes/utils/blob/master/net/net.go
-func isIPv4(ip string) bool {
-	return net.ParseIP(ip).To4() != nil
-}
-
-// isIPv4CIDR checks if the provided cidr block belongs to ipv4 family.
-// If cidr belongs to ipv4 family, return true else it returns false
-// TODO (aramase) move this to https://github.com/kubernetes/utils/blob/master/net/net.go
-func isIPv4CIDR(cidr string) bool {
-	ip, _, err := net.ParseCIDR(cidr)
-	framework.ExpectNoError(err)
-	return isIPv4(ip.String())
-}
-
 // createService returns a service spec with defined arguments
-func createService(name, ns string, labels map[string]string, ipFamily *v1.IPFamily) *v1.Service {
+func createService(name, ns string, labels map[string]string, ipFamilyPolicy *v1.IPFamilyPolicyType, ipFamilies []v1.IPFamily) *v1.Service {
 	return &v1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
 		},
 		Spec: v1.ServiceSpec{
-			Selector: labels,
-			Type:     v1.ServiceTypeNodePort,
-			IPFamily: ipFamily,
+			Selector:       labels,
+			Type:           v1.ServiceTypeNodePort,
+			IPFamilyPolicy: ipFamilyPolicy,
+			IPFamilies:     ipFamilies,
 			Ports: []v1.ServicePort{
 				{
 					Name:     "tcp-port",

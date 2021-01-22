@@ -23,65 +23,246 @@ import (
 
 	cadvisorapi "github.com/google/cadvisor/info/v1"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/kubernetes/pkg/kubelet/cm/cpumanager/state"
 	"k8s.io/kubernetes/pkg/kubelet/cm/cpumanager/topology"
 	"k8s.io/kubernetes/pkg/kubelet/cm/cpuset"
 	"k8s.io/kubernetes/pkg/kubelet/cm/topologymanager"
 	"k8s.io/kubernetes/pkg/kubelet/cm/topologymanager/bitmask"
 )
 
-func topologyHintLessThan(a topologymanager.TopologyHint, b topologymanager.TopologyHint) bool {
-	if a.Preferred != b.Preferred {
-		return a.Preferred == true
+type testCase struct {
+	name          string
+	pod           v1.Pod
+	container     v1.Container
+	assignments   state.ContainerCPUAssignments
+	defaultCPUSet cpuset.CPUSet
+	expectedHints []topologymanager.TopologyHint
+}
+
+func returnMachineInfo() cadvisorapi.MachineInfo {
+	return cadvisorapi.MachineInfo{
+		NumCores: 12,
+		Topology: []cadvisorapi.Node{
+			{Id: 0,
+				Cores: []cadvisorapi.Core{
+					{SocketID: 0, Id: 0, Threads: []int{0, 6}},
+					{SocketID: 0, Id: 1, Threads: []int{1, 7}},
+					{SocketID: 0, Id: 2, Threads: []int{2, 8}},
+				},
+			},
+			{Id: 1,
+				Cores: []cadvisorapi.Core{
+					{SocketID: 1, Id: 0, Threads: []int{3, 9}},
+					{SocketID: 1, Id: 1, Threads: []int{4, 10}},
+					{SocketID: 1, Id: 2, Threads: []int{5, 11}},
+				},
+			},
+		},
 	}
-	return a.NUMANodeAffinity.IsNarrowerThan(b.NUMANodeAffinity)
+}
+
+func TestPodGuaranteedCPUs(t *testing.T) {
+	CPUs := [][]struct {
+		request string
+		limit   string
+	}{
+		{
+			{request: "0", limit: "0"},
+		},
+		{
+			{request: "2", limit: "2"},
+		},
+		{
+			{request: "5", limit: "5"},
+		},
+		{
+			{request: "2", limit: "2"},
+			{request: "4", limit: "4"},
+		},
+	}
+	// tc for not guaranteed Pod
+	testPod1 := makeMultiContainerPod(CPUs[0], CPUs[0])
+	testPod2 := makeMultiContainerPod(CPUs[0], CPUs[1])
+	testPod3 := makeMultiContainerPod(CPUs[1], CPUs[0])
+	// tc for guaranteed Pod
+	testPod4 := makeMultiContainerPod(CPUs[1], CPUs[1])
+	testPod5 := makeMultiContainerPod(CPUs[2], CPUs[2])
+	// tc for comparing init containers and user containers
+	testPod6 := makeMultiContainerPod(CPUs[1], CPUs[2])
+	testPod7 := makeMultiContainerPod(CPUs[2], CPUs[1])
+	// tc for multi containers
+	testPod8 := makeMultiContainerPod(CPUs[3], CPUs[3])
+
+	p := staticPolicy{}
+
+	tcases := []struct {
+		name        string
+		pod         *v1.Pod
+		expectedCPU int
+	}{
+		{
+			name:        "TestCase01: if requestedCPU == 0, Pod is not Guaranteed Qos",
+			pod:         testPod1,
+			expectedCPU: 0,
+		},
+		{
+			name:        "TestCase02: if requestedCPU == 0, Pod is not Guaranteed Qos",
+			pod:         testPod2,
+			expectedCPU: 0,
+		},
+		{
+			name:        "TestCase03: if requestedCPU == 0, Pod is not Guaranteed Qos",
+			pod:         testPod3,
+			expectedCPU: 0,
+		},
+		{
+			name:        "TestCase04: Guaranteed Pod requests 2 CPUs",
+			pod:         testPod4,
+			expectedCPU: 2,
+		},
+		{
+			name:        "TestCase05: Guaranteed Pod requests 5 CPUs",
+			pod:         testPod5,
+			expectedCPU: 5,
+		},
+		{
+			name:        "TestCase06: The number of CPUs requested By app is bigger than the number of CPUs requested by init",
+			pod:         testPod6,
+			expectedCPU: 5,
+		},
+		{
+			name:        "TestCase07: The number of CPUs requested By init is bigger than the number of CPUs requested by app",
+			pod:         testPod7,
+			expectedCPU: 5,
+		},
+		{
+			name:        "TestCase08: Sum of CPUs requested by multiple containers",
+			pod:         testPod8,
+			expectedCPU: 6,
+		},
+	}
+	for _, tc := range tcases {
+		requestedCPU := p.podGuaranteedCPUs(tc.pod)
+
+		if requestedCPU != tc.expectedCPU {
+			t.Errorf("Expected in result to be %v , got %v", tc.expectedCPU, requestedCPU)
+		}
+	}
 }
 
 func TestGetTopologyHints(t *testing.T) {
-	testPod1 := makePod("2", "2")
+	machineInfo := returnMachineInfo()
+	tcases := returnTestCases()
+
+	for _, tc := range tcases {
+		topology, _ := topology.Discover(&machineInfo)
+
+		var activePods []*v1.Pod
+		for p := range tc.assignments {
+			pod := v1.Pod{}
+			pod.UID = types.UID(p)
+			for c := range tc.assignments[p] {
+				container := v1.Container{}
+				container.Name = c
+				pod.Spec.Containers = append(pod.Spec.Containers, container)
+			}
+			activePods = append(activePods, &pod)
+		}
+
+		m := manager{
+			policy: &staticPolicy{
+				topology: topology,
+			},
+			state: &mockState{
+				assignments:   tc.assignments,
+				defaultCPUSet: tc.defaultCPUSet,
+			},
+			topology:          topology,
+			activePods:        func() []*v1.Pod { return activePods },
+			podStatusProvider: mockPodStatusProvider{},
+			sourcesReady:      &sourcesReadyStub{},
+		}
+
+		hints := m.GetTopologyHints(&tc.pod, &tc.container)[string(v1.ResourceCPU)]
+		if len(tc.expectedHints) == 0 && len(hints) == 0 {
+			continue
+		}
+		sort.SliceStable(hints, func(i, j int) bool {
+			return hints[i].LessThan(hints[j])
+		})
+		sort.SliceStable(tc.expectedHints, func(i, j int) bool {
+			return tc.expectedHints[i].LessThan(tc.expectedHints[j])
+		})
+		if !reflect.DeepEqual(tc.expectedHints, hints) {
+			t.Errorf("Expected in result to be %v , got %v", tc.expectedHints, hints)
+		}
+	}
+}
+
+func TestGetPodTopologyHints(t *testing.T) {
+	machineInfo := returnMachineInfo()
+
+	for _, tc := range returnTestCases() {
+		topology, _ := topology.Discover(&machineInfo)
+
+		var activePods []*v1.Pod
+		for p := range tc.assignments {
+			pod := v1.Pod{}
+			pod.UID = types.UID(p)
+			for c := range tc.assignments[p] {
+				container := v1.Container{}
+				container.Name = c
+				pod.Spec.Containers = append(pod.Spec.Containers, container)
+			}
+			activePods = append(activePods, &pod)
+		}
+
+		m := manager{
+			policy: &staticPolicy{
+				topology: topology,
+			},
+			state: &mockState{
+				assignments:   tc.assignments,
+				defaultCPUSet: tc.defaultCPUSet,
+			},
+			topology:          topology,
+			activePods:        func() []*v1.Pod { return activePods },
+			podStatusProvider: mockPodStatusProvider{},
+			sourcesReady:      &sourcesReadyStub{},
+		}
+
+		podHints := m.GetPodTopologyHints(&tc.pod)[string(v1.ResourceCPU)]
+		if len(tc.expectedHints) == 0 && len(podHints) == 0 {
+			continue
+		}
+		sort.SliceStable(podHints, func(i, j int) bool {
+			return podHints[i].LessThan(podHints[j])
+		})
+		sort.SliceStable(tc.expectedHints, func(i, j int) bool {
+			return tc.expectedHints[i].LessThan(tc.expectedHints[j])
+		})
+		if !reflect.DeepEqual(tc.expectedHints, podHints) {
+			t.Errorf("Expected in result to be %v , got %v", tc.expectedHints, podHints)
+		}
+	}
+}
+
+func returnTestCases() []testCase {
+	testPod1 := makePod("fakePod", "fakeContainer", "2", "2")
 	testContainer1 := &testPod1.Spec.Containers[0]
-	testPod2 := makePod("5", "5")
+	testPod2 := makePod("fakePod", "fakeContainer", "5", "5")
 	testContainer2 := &testPod2.Spec.Containers[0]
-	testPod3 := makePod("7", "7")
+	testPod3 := makePod("fakePod", "fakeContainer", "7", "7")
 	testContainer3 := &testPod3.Spec.Containers[0]
-	testPod4 := makePod("11", "11")
+	testPod4 := makePod("fakePod", "fakeContainer", "11", "11")
 	testContainer4 := &testPod4.Spec.Containers[0]
 
 	firstSocketMask, _ := bitmask.NewBitMask(0)
 	secondSocketMask, _ := bitmask.NewBitMask(1)
 	crossSocketMask, _ := bitmask.NewBitMask(0, 1)
 
-	machineInfo := cadvisorapi.MachineInfo{
-		NumCores: 12,
-		Topology: []cadvisorapi.Node{
-			{Id: 0,
-				Cores: []cadvisorapi.Core{
-					{Id: 0, Threads: []int{0, 6}},
-					{Id: 1, Threads: []int{1, 7}},
-					{Id: 2, Threads: []int{2, 8}},
-				},
-			},
-			{Id: 1,
-				Cores: []cadvisorapi.Core{
-					{Id: 0, Threads: []int{3, 9}},
-					{Id: 1, Threads: []int{4, 10}},
-					{Id: 2, Threads: []int{5, 11}},
-				},
-			},
-		},
-	}
-
-	numaNodeInfo := topology.NUMANodeInfo{
-		0: cpuset.NewCPUSet(0, 6, 1, 7, 2, 8),
-		1: cpuset.NewCPUSet(3, 9, 4, 10, 5, 11),
-	}
-
-	tcases := []struct {
-		name          string
-		pod           v1.Pod
-		container     v1.Container
-		defaultCPUSet cpuset.CPUSet
-		expectedHints []topologymanager.TopologyHint
-	}{
+	return []testCase{
 		{
 			name:          "Request 2 CPUs, 4 available on NUMA 0, 6 available on NUMA 1",
 			pod:           *testPod1,
@@ -149,32 +330,95 @@ func TestGetTopologyHints(t *testing.T) {
 				},
 			},
 		},
-	}
-	for _, tc := range tcases {
-		topology, _ := topology.Discover(&machineInfo, numaNodeInfo)
-
-		m := manager{
-			policy: &staticPolicy{
-				topology: topology,
+		{
+			name:          "Request more CPUs than available",
+			pod:           *testPod2,
+			container:     *testContainer2,
+			defaultCPUSet: cpuset.NewCPUSet(0, 1, 2, 3),
+			expectedHints: nil,
+		},
+		{
+			name:      "Regenerate Single-Node NUMA Hints if already allocated 1/2",
+			pod:       *testPod1,
+			container: *testContainer1,
+			assignments: state.ContainerCPUAssignments{
+				string(testPod1.UID): map[string]cpuset.CPUSet{
+					testContainer1.Name: cpuset.NewCPUSet(0, 6),
+				},
 			},
-			state: &mockState{
-				defaultCPUSet: tc.defaultCPUSet,
+			defaultCPUSet: cpuset.NewCPUSet(),
+			expectedHints: []topologymanager.TopologyHint{
+				{
+					NUMANodeAffinity: firstSocketMask,
+					Preferred:        true,
+				},
+				{
+					NUMANodeAffinity: crossSocketMask,
+					Preferred:        false,
+				},
 			},
-			topology: topology,
-		}
-
-		hints := m.GetTopologyHints(tc.pod, tc.container)[string(v1.ResourceCPU)]
-		if len(tc.expectedHints) == 0 && len(hints) == 0 {
-			continue
-		}
-		sort.SliceStable(hints, func(i, j int) bool {
-			return topologyHintLessThan(hints[i], hints[j])
-		})
-		sort.SliceStable(tc.expectedHints, func(i, j int) bool {
-			return topologyHintLessThan(tc.expectedHints[i], tc.expectedHints[j])
-		})
-		if !reflect.DeepEqual(tc.expectedHints, hints) {
-			t.Errorf("Expected in result to be %v , got %v", tc.expectedHints, hints)
-		}
+		},
+		{
+			name:      "Regenerate Single-Node NUMA Hints if already allocated 1/2",
+			pod:       *testPod1,
+			container: *testContainer1,
+			assignments: state.ContainerCPUAssignments{
+				string(testPod1.UID): map[string]cpuset.CPUSet{
+					testContainer1.Name: cpuset.NewCPUSet(3, 9),
+				},
+			},
+			defaultCPUSet: cpuset.NewCPUSet(),
+			expectedHints: []topologymanager.TopologyHint{
+				{
+					NUMANodeAffinity: secondSocketMask,
+					Preferred:        true,
+				},
+				{
+					NUMANodeAffinity: crossSocketMask,
+					Preferred:        false,
+				},
+			},
+		},
+		{
+			name:      "Regenerate Cross-NUMA Hints if already allocated",
+			pod:       *testPod4,
+			container: *testContainer4,
+			assignments: state.ContainerCPUAssignments{
+				string(testPod4.UID): map[string]cpuset.CPUSet{
+					testContainer4.Name: cpuset.NewCPUSet(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
+				},
+			},
+			defaultCPUSet: cpuset.NewCPUSet(),
+			expectedHints: []topologymanager.TopologyHint{
+				{
+					NUMANodeAffinity: crossSocketMask,
+					Preferred:        true,
+				},
+			},
+		},
+		{
+			name:      "Requested less than already allocated",
+			pod:       *testPod1,
+			container: *testContainer1,
+			assignments: state.ContainerCPUAssignments{
+				string(testPod1.UID): map[string]cpuset.CPUSet{
+					testContainer1.Name: cpuset.NewCPUSet(0, 6, 3, 9),
+				},
+			},
+			defaultCPUSet: cpuset.NewCPUSet(),
+			expectedHints: []topologymanager.TopologyHint{},
+		},
+		{
+			name:      "Requested more than already allocated",
+			pod:       *testPod4,
+			container: *testContainer4,
+			assignments: state.ContainerCPUAssignments{
+				string(testPod4.UID): map[string]cpuset.CPUSet{
+					testContainer4.Name: cpuset.NewCPUSet(0, 6, 3, 9),
+				},
+			},
+			defaultCPUSet: cpuset.NewCPUSet(),
+			expectedHints: []topologymanager.TopologyHint{},
+		},
 	}
 }

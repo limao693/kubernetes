@@ -35,16 +35,29 @@ type DelayingInterface interface {
 
 // NewDelayingQueue constructs a new workqueue with delayed queuing ability
 func NewDelayingQueue() DelayingInterface {
-	return newDelayingQueue(clock.RealClock{}, "")
+	return NewDelayingQueueWithCustomClock(clock.RealClock{}, "")
 }
 
+// NewDelayingQueueWithCustomQueue constructs a new workqueue with ability to
+// inject custom queue Interface instead of the default one
+func NewDelayingQueueWithCustomQueue(q Interface, name string) DelayingInterface {
+	return newDelayingQueue(clock.RealClock{}, q, name)
+}
+
+// NewNamedDelayingQueue constructs a new named workqueue with delayed queuing ability
 func NewNamedDelayingQueue(name string) DelayingInterface {
-	return newDelayingQueue(clock.RealClock{}, name)
+	return NewDelayingQueueWithCustomClock(clock.RealClock{}, name)
 }
 
-func newDelayingQueue(clock clock.Clock, name string) DelayingInterface {
+// NewDelayingQueueWithCustomClock constructs a new named workqueue
+// with ability to inject real or fake clock for testing purposes
+func NewDelayingQueueWithCustomClock(clock clock.Clock, name string) DelayingInterface {
+	return newDelayingQueue(clock, NewNamed(name), name)
+}
+
+func newDelayingQueue(clock clock.Clock, q Interface, name string) *delayingType {
 	ret := &delayingType{
-		Interface:       NewNamed(name),
+		Interface:       q,
 		clock:           clock,
 		heartbeat:       clock.NewTicker(maxWait),
 		stopCh:          make(chan struct{}),
@@ -53,7 +66,6 @@ func newDelayingQueue(clock clock.Clock, name string) DelayingInterface {
 	}
 
 	go ret.waitingLoop()
-
 	return ret
 }
 

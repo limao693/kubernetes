@@ -18,6 +18,7 @@ package dynamiccertificates
 
 import (
 	"bytes"
+	"crypto/x509"
 )
 
 // CAContentProvider provides ca bundle byte content
@@ -27,6 +28,8 @@ type CAContentProvider interface {
 	// CurrentCABundleContent provides ca bundle byte content.  Errors can be contained to the controllers initializing
 	// the value.  By the time you get here, you should always be returning a value that won't fail.
 	CurrentCABundleContent() []byte
+	// VerifyOptions provides VerifyOptions for authenticators
+	VerifyOptions() (x509.VerifyOptions, bool)
 }
 
 // dynamicCertificateContent holds the content that overrides the baseTLSConfig
@@ -34,6 +37,7 @@ type dynamicCertificateContent struct {
 	// clientCA holds the content for the clientCA bundle
 	clientCA    caBundleContent
 	servingCert certKeyContent
+	sniCerts    []sniCertKeyContent
 }
 
 // caBundleContent holds the content for the clientCA bundle.  Wrapping the bytes makes the Equals work nicely with the
@@ -53,6 +57,16 @@ func (c *dynamicCertificateContent) Equal(rhs *dynamicCertificateContent) bool {
 
 	if !c.servingCert.Equal(&rhs.servingCert) {
 		return false
+	}
+
+	if len(c.sniCerts) != len(rhs.sniCerts) {
+		return false
+	}
+
+	for i := range c.sniCerts {
+		if !c.sniCerts[i].Equal(&rhs.sniCerts[i]) {
+			return false
+		}
 	}
 
 	return true

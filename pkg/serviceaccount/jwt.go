@@ -33,7 +33,9 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apiserver/pkg/audit"
 	"k8s.io/apiserver/pkg/authentication/authenticator"
+	apiserverserviceaccount "k8s.io/apiserver/pkg/authentication/serviceaccount"
 )
 
 // ServiceAccountTokenGetter defines functions to retrieve a named service account and secret
@@ -113,6 +115,10 @@ func signerFromRSAPrivateKey(keyPair *rsa.PrivateKey) (jose.Signer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to derive keyID: %v", err)
 	}
+
+	// IMPORTANT: If this function is updated to support additional key sizes,
+	// algorithmForPublicKey in serviceaccount/openidmetadata.go must also be
+	// updated to support the same key sizes. Today we only support RS256.
 
 	// Wrap the RSA keypair in a JOSE JWK with the designated key ID.
 	privateJWK := &jose.JSONWebKey{
@@ -240,7 +246,7 @@ type Validator interface {
 	// Validate validates a token and returns user information or an error.
 	// Validator can assume that the issuer and signature of a token are already
 	// verified when this function is called.
-	Validate(tokenData string, public *jwt.Claims, private interface{}) (*ServiceAccountInfo, error)
+	Validate(ctx context.Context, tokenData string, public *jwt.Claims, private interface{}) (*apiserverserviceaccount.ServiceAccountInfo, error)
 	// NewPrivateClaims returns a struct that the authenticator should
 	// deserialize the JWT payload into. The authenticator may then pass this
 	// struct back to the Validator as the 'private' argument to a Validate()
@@ -283,6 +289,8 @@ func (j *jwtTokenAuthenticator) AuthenticateToken(ctx context.Context, tokenData
 	tokenAudiences := authenticator.Audiences(public.Audience)
 	if len(tokenAudiences) == 0 {
 		// only apiserver audiences are allowed for legacy tokens
+		audit.AddAuditAnnotation(ctx, "authentication.k8s.io/legacy-token", public.Subject)
+		legacyTokensTotal.Inc()
 		tokenAudiences = j.implicitAuds
 	}
 
@@ -299,7 +307,7 @@ func (j *jwtTokenAuthenticator) AuthenticateToken(ctx context.Context, tokenData
 
 	// If we get here, we have a token with a recognized signature and
 	// issuer string.
-	sa, err := j.validator.Validate(tokenData, public, private)
+	sa, err := j.validator.Validate(ctx, tokenData, public, private)
 	if err != nil {
 		return nil, false, err
 	}

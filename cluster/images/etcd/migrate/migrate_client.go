@@ -26,10 +26,10 @@ import (
 	"strings"
 	"time"
 
-	clientv2 "github.com/coreos/etcd/client"
-	"github.com/coreos/etcd/clientv3"
+	clientv2 "go.etcd.io/etcd/client"
+	"go.etcd.io/etcd/clientv3"
 	"google.golang.org/grpc"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 // CombinedEtcdClient provides an implementation of EtcdMigrateClient using a combination of the etcd v2 client, v3 client

@@ -20,16 +20,18 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"time"
 
-	"k8s.io/api/core/v1"
+	"k8s.io/klog/v2"
+	"k8s.io/mount-utils"
+	utilstrings "k8s.io/utils/strings"
+
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/klog"
-	"k8s.io/kubernetes/pkg/util/mount"
 	"k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/util"
 	"k8s.io/kubernetes/pkg/volume/util/recyclerclient"
-	utilstrings "k8s.io/utils/strings"
 )
 
 func getPath(uid types.UID, volName string, host volume.VolumeHost) string {
@@ -60,7 +62,8 @@ var _ volume.PersistentVolumePlugin = &nfsPlugin{}
 var _ volume.RecyclableVolumePlugin = &nfsPlugin{}
 
 const (
-	nfsPluginName = "kubernetes.io/nfs"
+	nfsPluginName  = "kubernetes.io/nfs"
+	unMountTimeout = time.Minute
 )
 
 func (plugin *nfsPlugin) Init(host volume.VolumeHost) error {
@@ -89,11 +92,7 @@ func (plugin *nfsPlugin) CanSupport(spec *volume.Spec) bool {
 		(spec.Volume != nil && spec.Volume.NFS != nil)
 }
 
-func (plugin *nfsPlugin) IsMigratedToCSI() bool {
-	return false
-}
-
-func (plugin *nfsPlugin) RequiresRemount() bool {
+func (plugin *nfsPlugin) RequiresRemount(spec *volume.Spec) bool {
 	return false
 }
 
@@ -206,15 +205,15 @@ func (nfsMounter *nfsMounter) CanMount() error {
 	exec := nfsMounter.plugin.host.GetExec(nfsMounter.plugin.GetPluginName())
 	switch runtime.GOOS {
 	case "linux":
-		if _, err := exec.Run("test", "-x", "/sbin/mount.nfs"); err != nil {
+		if _, err := exec.Command("test", "-x", "/sbin/mount.nfs").CombinedOutput(); err != nil {
 			return fmt.Errorf("Required binary /sbin/mount.nfs is missing")
 		}
-		if _, err := exec.Run("test", "-x", "/sbin/mount.nfs4"); err != nil {
+		if _, err := exec.Command("test", "-x", "/sbin/mount.nfs4").CombinedOutput(); err != nil {
 			return fmt.Errorf("Required binary /sbin/mount.nfs4 is missing")
 		}
 		return nil
 	case "darwin":
-		if _, err := exec.Run("test", "-x", "/sbin/mount_nfs"); err != nil {
+		if _, err := exec.Command("test", "-x", "/sbin/mount_nfs").CombinedOutput(); err != nil {
 			return fmt.Errorf("Required binary /sbin/mount_nfs is missing")
 		}
 	}
@@ -262,7 +261,7 @@ func (nfsMounter *nfsMounter) SetUpAt(dir string, mounterArgs volume.MounterArgs
 		options = append(options, "ro")
 	}
 	mountOptions := util.JoinMountOptions(nfsMounter.mountOptions, options)
-	err = nfsMounter.mounter.Mount(source, dir, "nfs", mountOptions)
+	err = nfsMounter.mounter.MountSensitiveWithoutSystemd(source, dir, "nfs", mountOptions, nil)
 	if err != nil {
 		notMnt, mntErr := mount.IsNotMountPoint(nfsMounter.mounter, dir)
 		if mntErr != nil {
@@ -305,6 +304,11 @@ func (c *nfsUnmounter) TearDownAt(dir string) error {
 	// Use extensiveMountPointCheck to consult /proc/mounts. We can't use faster
 	// IsLikelyNotMountPoint (lstat()), since there may be root_squash on the
 	// NFS server and kubelet may not be able to do lstat/stat() there.
+	forceUmounter, ok := c.mounter.(mount.MounterForceUnmounter)
+	if ok {
+		klog.V(4).Infof("Using force unmounter interface")
+		return mount.CleanupMountWithForce(dir, forceUmounter, true /* extensiveMountPointCheck */, unMountTimeout)
+	}
 	return mount.CleanupMountPoint(dir, c.mounter, true /* extensiveMountPointCheck */)
 }
 

@@ -23,7 +23,7 @@ import (
 
 	jsonpatch "github.com/evanphx/json-patch"
 	"github.com/spf13/cobra"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -56,12 +56,13 @@ type LabelOptions struct {
 	overwrite       bool
 	list            bool
 	local           bool
-	dryrun          bool
+	dryRunStrategy  cmdutil.DryRunStrategy
 	all             bool
 	resourceVersion string
 	selector        string
 	fieldSelector   string
 	outputFormat    string
+	fieldManager    string
 
 	// results of arg parsing
 	resources    []string
@@ -74,6 +75,7 @@ type LabelOptions struct {
 	enforceNamespace             bool
 	builder                      *resource.Builder
 	unstructuredClientForMapping func(mapping *meta.RESTMapping) (resource.RESTClient, error)
+	dryRunVerifier               *resource.DryRunVerifier
 
 	// Common shared fields
 	genericclioptions.IOStreams
@@ -149,6 +151,7 @@ func NewCmdLabel(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cobr
 	usage := "identifying the resource to update the labels"
 	cmdutil.AddFilenameOptionFlags(cmd, &o.FilenameOptions, usage)
 	cmdutil.AddDryRunFlag(cmd)
+	cmdutil.AddFieldManagerFlagVar(cmd, &o.fieldManager, "kubectl-label")
 
 	return cmd
 }
@@ -164,14 +167,23 @@ func (o *LabelOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []st
 	}
 
 	o.outputFormat = cmdutil.GetFlagString(cmd, "output")
-	o.dryrun = cmdutil.GetDryRunFlag(cmd)
+	o.dryRunStrategy, err = cmdutil.GetDryRunStrategy(cmd)
+	if err != nil {
+		return err
+	}
+	dynamicClient, err := f.DynamicClient()
+	if err != nil {
+		return err
+	}
+	discoveryClient, err := f.ToDiscoveryClient()
+	if err != nil {
+		return err
+	}
+	o.dryRunVerifier = resource.NewDryRunVerifier(dynamicClient, discoveryClient)
 
+	cmdutil.PrintFlagsWithDryRunStrategy(o.PrintFlags, o.dryRunStrategy)
 	o.ToPrinter = func(operation string) (printers.ResourcePrinter, error) {
 		o.PrintFlags.NamePrintFlags.Operation = operation
-		if o.dryrun {
-			o.PrintFlags.Complete("%s (dry run)")
-		}
-
 		return o.PrintFlags.ToPrinter()
 	}
 
@@ -207,8 +219,20 @@ func (o *LabelOptions) Validate() error {
 	if o.all && len(o.fieldSelector) > 0 {
 		return fmt.Errorf("cannot set --all and --field-selector at the same time")
 	}
-	if len(o.resources) < 1 && cmdutil.IsFilenameSliceEmpty(o.FilenameOptions.Filenames, o.FilenameOptions.Kustomize) {
-		return fmt.Errorf("one or more resources must be specified as <resource> <name> or <resource>/<name>")
+	if o.local {
+		if o.dryRunStrategy == cmdutil.DryRunServer {
+			return fmt.Errorf("cannot specify --local and --dry-run=server - did you mean --dry-run=client?")
+		}
+		if len(o.resources) > 0 {
+			return fmt.Errorf("can only use local files by -f pod.yaml or --filename=pod.json when --local=true is set")
+		}
+		if cmdutil.IsFilenameSliceEmpty(o.FilenameOptions.Filenames, o.FilenameOptions.Kustomize) {
+			return fmt.Errorf("one or more files must be specified as -f pod.yaml or --filename=pod.json")
+		}
+	} else {
+		if len(o.resources) < 1 && cmdutil.IsFilenameSliceEmpty(o.FilenameOptions.Filenames, o.FilenameOptions.Kustomize) {
+			return fmt.Errorf("one or more resources must be specified as <resource> <name> or <resource>/<name>")
+		}
 	}
 	if len(o.newLabels) < 1 && len(o.removeLabels) < 1 && !o.list {
 		return fmt.Errorf("at least one label update is required")
@@ -253,11 +277,21 @@ func (o *LabelOptions) RunLabel() error {
 		var outputObj runtime.Object
 		var dataChangeMsg string
 		obj := info.Object
+
+		if len(o.resourceVersion) != 0 {
+			// ensure resourceVersion is always sent in the patch by clearing it from the starting JSON
+			accessor, err := meta.Accessor(obj)
+			if err != nil {
+				return err
+			}
+			accessor.SetResourceVersion("")
+		}
+
 		oldData, err := json.Marshal(obj)
 		if err != nil {
 			return err
 		}
-		if o.dryrun || o.local || o.list {
+		if o.dryRunStrategy == cmdutil.DryRunClient || o.local || o.list {
 			err = labelFunc(obj, o.overwrite, o.resourceVersion, o.newLabels, o.removeLabels)
 			if err != nil {
 				return err
@@ -301,11 +335,18 @@ func (o *LabelOptions) RunLabel() error {
 			}
 
 			mapping := info.ResourceMapping()
+			if o.dryRunStrategy == cmdutil.DryRunServer {
+				if err := o.dryRunVerifier.HasSupport(mapping.GroupVersionKind); err != nil {
+					return err
+				}
+			}
 			client, err := o.unstructuredClientForMapping(mapping)
 			if err != nil {
 				return err
 			}
-			helper := resource.NewHelper(client, mapping)
+			helper := resource.NewHelper(client, mapping).
+				DryRun(o.dryRunStrategy == cmdutil.DryRunServer).
+				WithFieldManager(o.fieldManager)
 
 			if createdPatch {
 				outputObj, err = helper.Patch(namespace, name, types.MergePatchType, patchBytes, nil)
@@ -330,7 +371,7 @@ func (o *LabelOptions) RunLabel() error {
 				if err != nil {
 					return err
 				}
-				fmt.Fprintf(o.ErrOut, "Listing labels for %s.%s/%s:\n", gvks[0].Kind, gvks[0].Group, info.Name)
+				fmt.Fprintf(o.Out, "Listing labels for %s.%s/%s:\n", gvks[0].Kind, gvks[0].Group, info.Name)
 			}
 			for k, v := range accessor.GetLabels() {
 				fmt.Fprintf(o.Out, "%s%s=%s\n", indent, k, v)

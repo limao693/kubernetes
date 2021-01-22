@@ -54,7 +54,8 @@ func (strategy) NamespaceScoped() bool {
 }
 
 func (strategy) PrepareForCreate(ctx context.Context, obj runtime.Object) {
-	_ = obj.(*api.ConfigMap)
+	configMap := obj.(*api.ConfigMap)
+	dropDisabledFields(configMap, nil)
 }
 
 func (strategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
@@ -72,18 +73,22 @@ func (strategy) AllowCreateOnUpdate() bool {
 }
 
 func (strategy) PrepareForUpdate(ctx context.Context, newObj, oldObj runtime.Object) {
-	_ = oldObj.(*api.ConfigMap)
-	_ = newObj.(*api.ConfigMap)
-}
-
-func (strategy) AllowUnconditionalUpdate() bool {
-	return true
+	oldConfigMap := oldObj.(*api.ConfigMap)
+	newConfigMap := newObj.(*api.ConfigMap)
+	dropDisabledFields(newConfigMap, oldConfigMap)
 }
 
 func (strategy) ValidateUpdate(ctx context.Context, newObj, oldObj runtime.Object) field.ErrorList {
 	oldCfg, newCfg := oldObj.(*api.ConfigMap), newObj.(*api.ConfigMap)
 
 	return validation.ValidateConfigMapUpdate(newCfg, oldCfg)
+}
+
+func dropDisabledFields(configMap *api.ConfigMap, oldConfigMap *api.ConfigMap) {
+}
+
+func (strategy) AllowUnconditionalUpdate() bool {
+	return true
 }
 
 // GetAttrs returns labels and fields of a given object for filtering purposes.

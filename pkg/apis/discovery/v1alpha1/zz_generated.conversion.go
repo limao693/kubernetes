@@ -99,6 +99,7 @@ func autoConvert_v1alpha1_Endpoint_To_discovery_Endpoint(in *v1alpha1.Endpoint, 
 	out.Hostname = (*string)(unsafe.Pointer(in.Hostname))
 	out.TargetRef = (*core.ObjectReference)(unsafe.Pointer(in.TargetRef))
 	out.Topology = *(*map[string]string)(unsafe.Pointer(&in.Topology))
+	out.NodeName = (*string)(unsafe.Pointer(in.NodeName))
 	return nil
 }
 
@@ -115,6 +116,7 @@ func autoConvert_discovery_Endpoint_To_v1alpha1_Endpoint(in *discovery.Endpoint,
 	out.Hostname = (*string)(unsafe.Pointer(in.Hostname))
 	out.TargetRef = (*v1.ObjectReference)(unsafe.Pointer(in.TargetRef))
 	out.Topology = *(*map[string]string)(unsafe.Pointer(&in.Topology))
+	out.NodeName = (*string)(unsafe.Pointer(in.NodeName))
 	return nil
 }
 
@@ -125,6 +127,8 @@ func Convert_discovery_Endpoint_To_v1alpha1_Endpoint(in *discovery.Endpoint, out
 
 func autoConvert_v1alpha1_EndpointConditions_To_discovery_EndpointConditions(in *v1alpha1.EndpointConditions, out *discovery.EndpointConditions, s conversion.Scope) error {
 	out.Ready = (*bool)(unsafe.Pointer(in.Ready))
+	out.Serving = (*bool)(unsafe.Pointer(in.Serving))
+	out.Terminating = (*bool)(unsafe.Pointer(in.Terminating))
 	return nil
 }
 
@@ -135,6 +139,8 @@ func Convert_v1alpha1_EndpointConditions_To_discovery_EndpointConditions(in *v1a
 
 func autoConvert_discovery_EndpointConditions_To_v1alpha1_EndpointConditions(in *discovery.EndpointConditions, out *v1alpha1.EndpointConditions, s conversion.Scope) error {
 	out.Ready = (*bool)(unsafe.Pointer(in.Ready))
+	out.Serving = (*bool)(unsafe.Pointer(in.Serving))
+	out.Terminating = (*bool)(unsafe.Pointer(in.Terminating))
 	return nil
 }
 
@@ -147,6 +153,7 @@ func autoConvert_v1alpha1_EndpointPort_To_discovery_EndpointPort(in *v1alpha1.En
 	out.Name = (*string)(unsafe.Pointer(in.Name))
 	out.Protocol = (*core.Protocol)(unsafe.Pointer(in.Protocol))
 	out.Port = (*int32)(unsafe.Pointer(in.Port))
+	out.AppProtocol = (*string)(unsafe.Pointer(in.AppProtocol))
 	return nil
 }
 
@@ -159,6 +166,7 @@ func autoConvert_discovery_EndpointPort_To_v1alpha1_EndpointPort(in *discovery.E
 	out.Name = (*string)(unsafe.Pointer(in.Name))
 	out.Protocol = (*v1.Protocol)(unsafe.Pointer(in.Protocol))
 	out.Port = (*int32)(unsafe.Pointer(in.Port))
+	out.AppProtocol = (*string)(unsafe.Pointer(in.AppProtocol))
 	return nil
 }
 
@@ -169,7 +177,7 @@ func Convert_discovery_EndpointPort_To_v1alpha1_EndpointPort(in *discovery.Endpo
 
 func autoConvert_v1alpha1_EndpointSlice_To_discovery_EndpointSlice(in *v1alpha1.EndpointSlice, out *discovery.EndpointSlice, s conversion.Scope) error {
 	out.ObjectMeta = in.ObjectMeta
-	out.AddressType = (*discovery.AddressType)(unsafe.Pointer(in.AddressType))
+	out.AddressType = discovery.AddressType(in.AddressType)
 	out.Endpoints = *(*[]discovery.Endpoint)(unsafe.Pointer(&in.Endpoints))
 	out.Ports = *(*[]discovery.EndpointPort)(unsafe.Pointer(&in.Ports))
 	return nil
@@ -182,7 +190,7 @@ func Convert_v1alpha1_EndpointSlice_To_discovery_EndpointSlice(in *v1alpha1.Endp
 
 func autoConvert_discovery_EndpointSlice_To_v1alpha1_EndpointSlice(in *discovery.EndpointSlice, out *v1alpha1.EndpointSlice, s conversion.Scope) error {
 	out.ObjectMeta = in.ObjectMeta
-	out.AddressType = (*v1alpha1.AddressType)(unsafe.Pointer(in.AddressType))
+	out.AddressType = v1alpha1.AddressType(in.AddressType)
 	out.Endpoints = *(*[]v1alpha1.Endpoint)(unsafe.Pointer(&in.Endpoints))
 	out.Ports = *(*[]v1alpha1.EndpointPort)(unsafe.Pointer(&in.Ports))
 	return nil

@@ -17,6 +17,8 @@ limitations under the License.
 package storage
 
 import (
+	"context"
+
 	"github.com/onsi/ginkgo"
 	"github.com/onsi/gomega"
 
@@ -39,8 +41,10 @@ import (
 	volumehelpers "k8s.io/cloud-provider/volume/helpers"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/test/e2e/framework"
+	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
+	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	"k8s.io/kubernetes/test/e2e/storage/testsuites"
 	"k8s.io/kubernetes/test/e2e/storage/utils"
 	imageutils "k8s.io/kubernetes/test/utils/image"
@@ -65,13 +69,13 @@ var _ = utils.SIGDescribe("Regional PD", func() {
 		c = f.ClientSet
 		ns = f.Namespace.Name
 
-		framework.SkipUnlessProviderIs("gce", "gke")
-		framework.SkipUnlessMultizone(c)
+		e2eskipper.SkipUnlessProviderIs("gce", "gke")
+		e2eskipper.SkipUnlessMultizone(c)
 	})
 
 	ginkgo.Describe("RegionalPD", func() {
 		ginkgo.It("should provision storage [Slow]", func() {
-			testVolumeProvisioning(c, ns)
+			testVolumeProvisioning(c, f.Timeouts, ns)
 		})
 
 		ginkgo.It("should provision storage with delayed binding [Slow]", func() {
@@ -94,7 +98,7 @@ var _ = utils.SIGDescribe("Regional PD", func() {
 	})
 })
 
-func testVolumeProvisioning(c clientset.Interface, ns string) {
+func testVolumeProvisioning(c clientset.Interface, t *framework.TimeoutContext, ns string) {
 	cloudZones := getTwoRandomZones(c)
 
 	// This test checks that dynamic provisioning can provision a volume
@@ -104,6 +108,7 @@ func testVolumeProvisioning(c clientset.Interface, ns string) {
 			Name:           "HDD Regional PD on GCE/GKE",
 			CloudProviders: []string{"gce", "gke"},
 			Provisioner:    "kubernetes.io/gce-pd",
+			Timeouts:       framework.NewTimeoutContextWithDefaults(),
 			Parameters: map[string]string{
 				"type":             "pd-standard",
 				"zones":            strings.Join(cloudZones, ","),
@@ -112,7 +117,7 @@ func testVolumeProvisioning(c clientset.Interface, ns string) {
 			ClaimSize:    repdMinSize,
 			ExpectedSize: repdMinSize,
 			PvCheck: func(claim *v1.PersistentVolumeClaim) {
-				volume := testsuites.PVWriteReadSingleNodeCheck(c, claim, e2epod.NodeSelection{})
+				volume := testsuites.PVWriteReadSingleNodeCheck(c, t, claim, e2epod.NodeSelection{})
 				gomega.Expect(volume).NotTo(gomega.BeNil())
 
 				err := checkGCEPD(volume, "pd-standard")
@@ -126,6 +131,7 @@ func testVolumeProvisioning(c clientset.Interface, ns string) {
 			Name:           "HDD Regional PD with auto zone selection on GCE/GKE",
 			CloudProviders: []string{"gce", "gke"},
 			Provisioner:    "kubernetes.io/gce-pd",
+			Timeouts:       framework.NewTimeoutContextWithDefaults(),
 			Parameters: map[string]string{
 				"type":             "pd-standard",
 				"replication-type": "regional-pd",
@@ -133,12 +139,12 @@ func testVolumeProvisioning(c clientset.Interface, ns string) {
 			ClaimSize:    repdMinSize,
 			ExpectedSize: repdMinSize,
 			PvCheck: func(claim *v1.PersistentVolumeClaim) {
-				volume := testsuites.PVWriteReadSingleNodeCheck(c, claim, e2epod.NodeSelection{})
+				volume := testsuites.PVWriteReadSingleNodeCheck(c, t, claim, e2epod.NodeSelection{})
 				gomega.Expect(volume).NotTo(gomega.BeNil())
 
 				err := checkGCEPD(volume, "pd-standard")
 				framework.ExpectNoError(err, "checkGCEPD")
-				zones, err := framework.GetClusterZones(c)
+				zones, err := e2enode.GetClusterZones(c)
 				framework.ExpectNoError(err, "GetClusterZones")
 				err = verifyZonesInPV(volume, zones, false /* match */)
 				framework.ExpectNoError(err, "verifyZonesInPV")
@@ -163,6 +169,7 @@ func testZonalFailover(c clientset.Interface, ns string) {
 	testSpec := testsuites.StorageClassTest{
 		Name:           "Regional PD Failover on GCE/GKE",
 		CloudProviders: []string{"gce", "gke"},
+		Timeouts:       framework.NewTimeoutContextWithDefaults(),
 		Provisioner:    "kubernetes.io/gce-pd",
 		Parameters: map[string]string{
 			"type":             "pd-standard",
@@ -182,43 +189,42 @@ func testZonalFailover(c clientset.Interface, ns string) {
 	statefulSet, service, regionalPDLabels := newStatefulSet(claimTemplate, ns)
 
 	ginkgo.By("creating a StorageClass " + class.Name)
-	_, err := c.StorageV1().StorageClasses().Create(class)
+	_, err := c.StorageV1().StorageClasses().Create(context.TODO(), class, metav1.CreateOptions{})
 	framework.ExpectNoError(err)
 	defer func() {
 		framework.Logf("deleting storage class %s", class.Name)
-		framework.ExpectNoError(c.StorageV1().StorageClasses().Delete(class.Name, nil),
+		framework.ExpectNoError(c.StorageV1().StorageClasses().Delete(context.TODO(), class.Name, metav1.DeleteOptions{}),
 			"Error deleting StorageClass %s", class.Name)
 	}()
 
 	ginkgo.By("creating a StatefulSet")
-	_, err = c.CoreV1().Services(ns).Create(service)
+	_, err = c.CoreV1().Services(ns).Create(context.TODO(), service, metav1.CreateOptions{})
 	framework.ExpectNoError(err)
-	_, err = c.AppsV1().StatefulSets(ns).Create(statefulSet)
+	_, err = c.AppsV1().StatefulSets(ns).Create(context.TODO(), statefulSet, metav1.CreateOptions{})
 	framework.ExpectNoError(err)
 
 	defer func() {
 		framework.Logf("deleting statefulset%q/%q", statefulSet.Namespace, statefulSet.Name)
 		// typically this claim has already been deleted
-		framework.ExpectNoError(c.AppsV1().StatefulSets(ns).Delete(statefulSet.Name, nil /* options */),
+		framework.ExpectNoError(c.AppsV1().StatefulSets(ns).Delete(context.TODO(), statefulSet.Name, metav1.DeleteOptions{}),
 			"Error deleting StatefulSet %s", statefulSet.Name)
 
 		framework.Logf("deleting claims in namespace %s", ns)
 		pvc := getPVC(c, ns, regionalPDLabels)
-		framework.ExpectNoError(c.CoreV1().PersistentVolumeClaims(pvc.Namespace).Delete(pvc.Name, nil),
+		framework.ExpectNoError(c.CoreV1().PersistentVolumeClaims(pvc.Namespace).Delete(context.TODO(), pvc.Name, metav1.DeleteOptions{}),
 			"Error deleting claim %s.", pvc.Name)
 		if pvc.Spec.VolumeName != "" {
-			err = framework.WaitForPersistentVolumeDeleted(c, pvc.Spec.VolumeName, framework.Poll, pvDeletionTimeout)
+			err = e2epv.WaitForPersistentVolumeDeleted(c, pvc.Spec.VolumeName, framework.Poll, pvDeletionTimeout)
 			if err != nil {
 				framework.Logf("WARNING: PV %s is not yet deleted, and subsequent tests may be affected.", pvc.Spec.VolumeName)
 			}
 		}
 	}()
 
-	err = framework.WaitForStatefulSetReplicasReady(statefulSet.Name, ns, c, framework.Poll, statefulSetReadyTimeout)
+	err = waitForStatefulSetReplicasReady(statefulSet.Name, ns, c, framework.Poll, statefulSetReadyTimeout)
 	if err != nil {
 		pod := getPod(c, ns, regionalPDLabels)
-		gomega.Expect(podutil.IsPodReadyConditionTrue(pod.Status)).To(gomega.BeTrue(),
-			"The statefulset pod has the following conditions: %s", pod.Status.Conditions)
+		framework.ExpectEqual(podutil.IsPodReadyConditionTrue(pod.Status), true, "The statefulset pod has the following conditions: %s", pod.Status.Conditions)
 		framework.ExpectNoError(err)
 	}
 
@@ -227,13 +233,13 @@ func testZonalFailover(c clientset.Interface, ns string) {
 	ginkgo.By("getting zone information from pod")
 	pod := getPod(c, ns, regionalPDLabels)
 	nodeName := pod.Spec.NodeName
-	node, err := c.CoreV1().Nodes().Get(nodeName, metav1.GetOptions{})
+	node, err := c.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
 	framework.ExpectNoError(err)
-	podZone := node.Labels[v1.LabelZoneFailureDomain]
+	podZone := node.Labels[v1.LabelFailureDomainBetaZone]
 
 	ginkgo.By("tainting nodes in the zone the pod is scheduled in")
-	selector := labels.SelectorFromSet(labels.Set(map[string]string{v1.LabelZoneFailureDomain: podZone}))
-	nodesInZone, err := c.CoreV1().Nodes().List(metav1.ListOptions{LabelSelector: selector.String()})
+	selector := labels.SelectorFromSet(labels.Set(map[string]string{v1.LabelFailureDomainBetaZone: podZone}))
+	nodesInZone, err := c.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{LabelSelector: selector.String()})
 	framework.ExpectNoError(err)
 	removeTaintFunc := addTaint(c, ns, nodesInZone.Items, podZone)
 
@@ -243,7 +249,7 @@ func testZonalFailover(c clientset.Interface, ns string) {
 	}()
 
 	ginkgo.By("deleting StatefulSet pod")
-	err = c.CoreV1().Pods(ns).Delete(pod.Name, &metav1.DeleteOptions{})
+	err = c.CoreV1().Pods(ns).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{})
 
 	// Verify the pod is scheduled in the other zone.
 	ginkgo.By("verifying the pod is scheduled in a different zone.")
@@ -253,24 +259,22 @@ func testZonalFailover(c clientset.Interface, ns string) {
 	} else {
 		otherZone = cloudZones[0]
 	}
-	err = wait.PollImmediate(framework.Poll, statefulSetReadyTimeout, func() (bool, error) {
-		framework.Logf("checking whether new pod is scheduled in zone %q", otherZone)
-		pod = getPod(c, ns, regionalPDLabels)
-		nodeName = pod.Spec.NodeName
-		node, err = c.CoreV1().Nodes().Get(nodeName, metav1.GetOptions{})
+	waitErr := wait.PollImmediate(framework.Poll, statefulSetReadyTimeout, func() (bool, error) {
+		framework.Logf("Checking whether new pod is scheduled in zone %q", otherZone)
+		pod := getPod(c, ns, regionalPDLabels)
+		node, err := c.CoreV1().Nodes().Get(context.TODO(), pod.Spec.NodeName, metav1.GetOptions{})
 		if err != nil {
 			return false, nil
 		}
-		newPodZone := node.Labels[v1.LabelZoneFailureDomain]
+		newPodZone := node.Labels[v1.LabelFailureDomainBetaZone]
 		return newPodZone == otherZone, nil
 	})
-	framework.ExpectNoError(err, "Error waiting for pod to be scheduled in a different zone (%q): %v", otherZone, err)
+	framework.ExpectNoError(waitErr, "Error waiting for pod to be scheduled in a different zone (%q): %v", otherZone, err)
 
-	err = framework.WaitForStatefulSetReplicasReady(statefulSet.Name, ns, c, 3*time.Second, framework.RestartPodReadyAgainTimeout)
+	err = waitForStatefulSetReplicasReady(statefulSet.Name, ns, c, 3*time.Second, framework.RestartPodReadyAgainTimeout)
 	if err != nil {
 		pod := getPod(c, ns, regionalPDLabels)
-		gomega.Expect(podutil.IsPodReadyConditionTrue(pod.Status)).To(gomega.BeTrue(),
-			"The statefulset pod has the following conditions: %s", pod.Status.Conditions)
+		framework.ExpectEqual(podutil.IsPodReadyConditionTrue(pod.Status), true, "The statefulset pod has the following conditions: %s", pod.Status.Conditions)
 		framework.ExpectNoError(err)
 	}
 
@@ -309,13 +313,13 @@ func addTaint(c clientset.Interface, ns string, nodes []v1.Node, podZone string)
 		framework.ExpectNoError(err)
 		reversePatches[node.Name] = reversePatchBytes
 
-		_, err = c.CoreV1().Nodes().Patch(node.Name, types.StrategicMergePatchType, patchBytes)
+		_, err = c.CoreV1().Nodes().Patch(context.TODO(), node.Name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
 		framework.ExpectNoError(err)
 	}
 
 	return func() {
 		for nodeName, reversePatch := range reversePatches {
-			_, err := c.CoreV1().Nodes().Patch(nodeName, types.StrategicMergePatchType, reversePatch)
+			_, err := c.CoreV1().Nodes().Patch(context.TODO(), nodeName, types.StrategicMergePatchType, reversePatch, metav1.PatchOptions{})
 			framework.ExpectNoError(err)
 		}
 	}
@@ -326,6 +330,7 @@ func testRegionalDelayedBinding(c clientset.Interface, ns string, pvcCount int) 
 		Client:      c,
 		Name:        "Regional PD storage class with waitForFirstConsumer test on GCE",
 		Provisioner: "kubernetes.io/gce-pd",
+		Timeouts:    framework.NewTimeoutContextWithDefaults(),
 		Parameters: map[string]string{
 			"type":             "pd-standard",
 			"replication-type": "regional-pd",
@@ -349,9 +354,9 @@ func testRegionalDelayedBinding(c clientset.Interface, ns string, pvcCount int) 
 	if node == nil {
 		framework.Failf("unexpected nil node found")
 	}
-	zone, ok := node.Labels[v1.LabelZoneFailureDomain]
+	zone, ok := node.Labels[v1.LabelFailureDomainBetaZone]
 	if !ok {
-		framework.Failf("label %s not found on Node", v1.LabelZoneFailureDomain)
+		framework.Failf("label %s not found on Node", v1.LabelFailureDomainBetaZone)
 	}
 	for _, pv := range pvs {
 		checkZoneFromLabelAndAffinity(pv, zone, false)
@@ -362,6 +367,7 @@ func testRegionalAllowedTopologies(c clientset.Interface, ns string) {
 	test := testsuites.StorageClassTest{
 		Name:        "Regional PD storage class with allowedTopologies test on GCE",
 		Provisioner: "kubernetes.io/gce-pd",
+		Timeouts:    framework.NewTimeoutContextWithDefaults(),
 		Parameters: map[string]string{
 			"type":             "pd-standard",
 			"replication-type": "regional-pd",
@@ -389,6 +395,7 @@ func testRegionalAllowedTopologies(c clientset.Interface, ns string) {
 func testRegionalAllowedTopologiesWithDelayedBinding(c clientset.Interface, ns string, pvcCount int) {
 	test := testsuites.StorageClassTest{
 		Client:      c,
+		Timeouts:    framework.NewTimeoutContextWithDefaults(),
 		Name:        "Regional PD storage class with allowedTopologies and waitForFirstConsumer test on GCE",
 		Provisioner: "kubernetes.io/gce-pd",
 		Parameters: map[string]string{
@@ -416,9 +423,9 @@ func testRegionalAllowedTopologiesWithDelayedBinding(c clientset.Interface, ns s
 	if node == nil {
 		framework.Failf("unexpected nil node found")
 	}
-	nodeZone, ok := node.Labels[v1.LabelZoneFailureDomain]
+	nodeZone, ok := node.Labels[v1.LabelFailureDomainBetaZone]
 	if !ok {
-		framework.Failf("label %s not found on Node", v1.LabelZoneFailureDomain)
+		framework.Failf("label %s not found on Node", v1.LabelFailureDomainBetaZone)
 	}
 	zoneFound := false
 	for _, zone := range topoZones {
@@ -438,7 +445,7 @@ func testRegionalAllowedTopologiesWithDelayedBinding(c clientset.Interface, ns s
 func getPVC(c clientset.Interface, ns string, pvcLabels map[string]string) *v1.PersistentVolumeClaim {
 	selector := labels.Set(pvcLabels).AsSelector()
 	options := metav1.ListOptions{LabelSelector: selector.String()}
-	pvcList, err := c.CoreV1().PersistentVolumeClaims(ns).List(options)
+	pvcList, err := c.CoreV1().PersistentVolumeClaims(ns).List(context.TODO(), options)
 	framework.ExpectNoError(err)
 	framework.ExpectEqual(len(pvcList.Items), 1, "There should be exactly 1 PVC matched.")
 
@@ -448,7 +455,7 @@ func getPVC(c clientset.Interface, ns string, pvcLabels map[string]string) *v1.P
 func getPod(c clientset.Interface, ns string, podLabels map[string]string) *v1.Pod {
 	selector := labels.Set(podLabels).AsSelector()
 	options := metav1.ListOptions{LabelSelector: selector.String()}
-	podList, err := c.CoreV1().Pods(ns).List(options)
+	podList, err := c.CoreV1().Pods(ns).List(context.TODO(), options)
 	framework.ExpectNoError(err)
 	framework.ExpectEqual(len(podList.Items), 1, "There should be exactly 1 pod matched.")
 
@@ -459,7 +466,7 @@ func addAllowedTopologiesToStorageClass(c clientset.Interface, sc *storagev1.Sto
 	term := v1.TopologySelectorTerm{
 		MatchLabelExpressions: []v1.TopologySelectorLabelRequirement{
 			{
-				Key:    v1.LabelZoneFailureDomain,
+				Key:    v1.LabelFailureDomainBetaZone,
 				Values: zones,
 			},
 		},
@@ -548,7 +555,7 @@ func newPodTemplate(labels map[string]string) *v1.PodTemplateSpec {
 }
 
 func getTwoRandomZones(c clientset.Interface) []string {
-	zones, err := framework.GetClusterZones(c)
+	zones, err := e2enode.GetClusterZones(c)
 	framework.ExpectNoError(err)
 	gomega.Expect(zones.Len()).To(gomega.BeNumerically(">=", 2),
 		"The test should only be run in multizone clusters.")
@@ -561,7 +568,7 @@ func getTwoRandomZones(c clientset.Interface) []string {
 // If match is true, check if zones in PV exactly match zones given.
 // Otherwise, check whether zones in PV is superset of zones given.
 func verifyZonesInPV(volume *v1.PersistentVolume, zones sets.String, match bool) error {
-	pvZones, err := volumehelpers.LabelZonesToSet(volume.Labels[v1.LabelZoneFailureDomain])
+	pvZones, err := volumehelpers.LabelZonesToSet(volume.Labels[v1.LabelFailureDomainBetaZone])
 	if err != nil {
 		return err
 	}
@@ -578,17 +585,17 @@ func checkZoneFromLabelAndAffinity(pv *v1.PersistentVolume, zone string, matchZo
 	checkZonesFromLabelAndAffinity(pv, sets.NewString(zone), matchZone)
 }
 
-// checkZoneLabelAndAffinity checks the LabelZoneFailureDomain label of PV and terms
-// with key LabelZoneFailureDomain in PV's node affinity contains zone
+// checkZoneLabelAndAffinity checks the LabelFailureDomainBetaZone label of PV and terms
+// with key LabelFailureDomainBetaZone in PV's node affinity contains zone
 // matchZones is used to indicate if zones should match perfectly
 func checkZonesFromLabelAndAffinity(pv *v1.PersistentVolume, zones sets.String, matchZones bool) {
 	ginkgo.By("checking PV's zone label and node affinity terms match expected zone")
 	if pv == nil {
 		framework.Failf("nil pv passed")
 	}
-	pvLabel, ok := pv.Labels[v1.LabelZoneFailureDomain]
+	pvLabel, ok := pv.Labels[v1.LabelFailureDomainBetaZone]
 	if !ok {
-		framework.Failf("label %s not found on PV", v1.LabelZoneFailureDomain)
+		framework.Failf("label %s not found on PV", v1.LabelFailureDomainBetaZone)
 	}
 
 	zonesFromLabel, err := volumehelpers.LabelZonesToSet(pvLabel)
@@ -596,10 +603,10 @@ func checkZonesFromLabelAndAffinity(pv *v1.PersistentVolume, zones sets.String, 
 		framework.Failf("unable to parse zone labels %s: %v", pvLabel, err)
 	}
 	if matchZones && !zonesFromLabel.Equal(zones) {
-		framework.Failf("value[s] of %s label for PV: %v does not match expected zone[s]: %v", v1.LabelZoneFailureDomain, zonesFromLabel, zones)
+		framework.Failf("value[s] of %s label for PV: %v does not match expected zone[s]: %v", v1.LabelFailureDomainBetaZone, zonesFromLabel, zones)
 	}
 	if !matchZones && !zonesFromLabel.IsSuperset(zones) {
-		framework.Failf("value[s] of %s label for PV: %v does not contain expected zone[s]: %v", v1.LabelZoneFailureDomain, zonesFromLabel, zones)
+		framework.Failf("value[s] of %s label for PV: %v does not contain expected zone[s]: %v", v1.LabelFailureDomainBetaZone, zonesFromLabel, zones)
 	}
 	if pv.Spec.NodeAffinity == nil {
 		framework.Failf("node affinity not found in PV spec %v", pv.Spec)
@@ -611,7 +618,7 @@ func checkZonesFromLabelAndAffinity(pv *v1.PersistentVolume, zones sets.String, 
 	for _, term := range pv.Spec.NodeAffinity.Required.NodeSelectorTerms {
 		keyFound := false
 		for _, r := range term.MatchExpressions {
-			if r.Key != v1.LabelZoneFailureDomain {
+			if r.Key != v1.LabelFailureDomainBetaZone {
 				continue
 			}
 			keyFound = true
@@ -625,7 +632,25 @@ func checkZonesFromLabelAndAffinity(pv *v1.PersistentVolume, zones sets.String, 
 			break
 		}
 		if !keyFound {
-			framework.Failf("label %s not found in term %v", v1.LabelZoneFailureDomain, term)
+			framework.Failf("label %s not found in term %v", v1.LabelFailureDomainBetaZone, term)
 		}
 	}
+}
+
+// waitForStatefulSetReplicasReady waits for all replicas of a StatefulSet to become ready or until timeout occurs, whichever comes first.
+func waitForStatefulSetReplicasReady(statefulSetName, ns string, c clientset.Interface, Poll, timeout time.Duration) error {
+	framework.Logf("Waiting up to %v for StatefulSet %s to have all replicas ready", timeout, statefulSetName)
+	for start := time.Now(); time.Since(start) < timeout; time.Sleep(Poll) {
+		sts, err := c.AppsV1().StatefulSets(ns).Get(context.TODO(), statefulSetName, metav1.GetOptions{})
+		if err != nil {
+			framework.Logf("Get StatefulSet %s failed, ignoring for %v: %v", statefulSetName, Poll, err)
+			continue
+		}
+		if sts.Status.ReadyReplicas == *sts.Spec.Replicas {
+			framework.Logf("All %d replicas of StatefulSet %s are ready. (%v)", sts.Status.ReadyReplicas, statefulSetName, time.Since(start))
+			return nil
+		}
+		framework.Logf("StatefulSet %s found but there are %d ready replicas and %d total replicas.", statefulSetName, sts.Status.ReadyReplicas, *sts.Spec.Replicas)
+	}
+	return fmt.Errorf("StatefulSet %s still has unready pods within %v", statefulSetName, timeout)
 }

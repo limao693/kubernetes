@@ -17,18 +17,24 @@ limitations under the License.
 package gcp
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/onsi/ginkgo"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/common"
 	"k8s.io/kubernetes/test/e2e/framework"
+	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
+	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 )
 
 func addMasterReplica(zone string) error {
@@ -111,6 +117,48 @@ func removeZoneFromZones(zones []string, zone string) []string {
 	return zones
 }
 
+// generateMasterRegexp returns a regex for matching master node name.
+func generateMasterRegexp(prefix string) string {
+	return prefix + "(-...)?"
+}
+
+// waitForMasters waits until the cluster has the desired number of ready masters in it.
+func waitForMasters(masterPrefix string, c clientset.Interface, size int, timeout time.Duration) error {
+	for start := time.Now(); time.Since(start) < timeout; time.Sleep(20 * time.Second) {
+		nodes, err := c.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
+		if err != nil {
+			framework.Logf("Failed to list nodes: %v", err)
+			continue
+		}
+
+		// Filter out nodes that are not master replicas
+		e2enode.Filter(nodes, func(node v1.Node) bool {
+			res, err := regexp.Match(generateMasterRegexp(masterPrefix), ([]byte)(node.Name))
+			if err != nil {
+				framework.Logf("Failed to match regexp to node name: %v", err)
+				return false
+			}
+			return res
+		})
+
+		numNodes := len(nodes.Items)
+
+		// Filter out not-ready nodes.
+		e2enode.Filter(nodes, func(node v1.Node) bool {
+			return e2enode.IsConditionSetAsExpected(&node, v1.NodeReady, true)
+		})
+
+		numReady := len(nodes.Items)
+
+		if numNodes == size && numReady == size {
+			framework.Logf("Cluster has reached the desired number of masters %d", size)
+			return nil
+		}
+		framework.Logf("Waiting for the number of masters %d, current %d, not ready master nodes %d", size, numNodes, numNodes-numReady)
+	}
+	return fmt.Errorf("timeout waiting %v for the number of masters to be %d", timeout, size)
+}
+
 var _ = SIGDescribe("HA-master [Feature:HAMaster]", func() {
 	f := framework.NewDefaultFramework("ha-master")
 	var c clientset.Interface
@@ -120,10 +168,10 @@ var _ = SIGDescribe("HA-master [Feature:HAMaster]", func() {
 	var existingRCs []string
 
 	ginkgo.BeforeEach(func() {
-		framework.SkipUnlessProviderIs("gce")
+		e2eskipper.SkipUnlessProviderIs("gce")
 		c = f.ClientSet
 		ns = f.Namespace.Name
-		framework.ExpectNoError(framework.WaitForMasters(framework.TestContext.CloudConfig.MasterName, c, 1, 10*time.Minute))
+		framework.ExpectNoError(waitForMasters(framework.TestContext.CloudConfig.MasterName, c, 1, 10*time.Minute))
 		additionalReplicaZones = make([]string, 0)
 		existingRCs = make([]string, 0)
 	})
@@ -139,7 +187,7 @@ var _ = SIGDescribe("HA-master [Feature:HAMaster]", func() {
 		for _, zone := range additionalReplicaZones {
 			removeMasterReplica(zone)
 		}
-		framework.ExpectNoError(framework.WaitForMasters(framework.TestContext.CloudConfig.MasterName, c, 1, 10*time.Minute))
+		framework.ExpectNoError(waitForMasters(framework.TestContext.CloudConfig.MasterName, c, 1, 10*time.Minute))
 	})
 
 	type Action int
@@ -167,7 +215,7 @@ var _ = SIGDescribe("HA-master [Feature:HAMaster]", func() {
 			framework.ExpectNoError(removeWorkerNodes(zone))
 			additionalNodesZones = removeZoneFromZones(additionalNodesZones, zone)
 		}
-		framework.ExpectNoError(framework.WaitForMasters(framework.TestContext.CloudConfig.MasterName, c, len(additionalReplicaZones)+1, 10*time.Minute))
+		framework.ExpectNoError(waitForMasters(framework.TestContext.CloudConfig.MasterName, c, len(additionalReplicaZones)+1, 10*time.Minute))
 		framework.ExpectNoError(framework.AllNodesReady(c, 5*time.Minute))
 
 		// Verify that API server works correctly with HA master.

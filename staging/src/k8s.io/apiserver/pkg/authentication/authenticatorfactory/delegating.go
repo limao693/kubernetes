@@ -22,6 +22,7 @@ import (
 
 	"github.com/go-openapi/spec"
 
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apiserver/pkg/authentication/authenticator"
 	"k8s.io/apiserver/pkg/authentication/group"
 	"k8s.io/apiserver/pkg/authentication/request/anonymous"
@@ -30,10 +31,9 @@ import (
 	unionauth "k8s.io/apiserver/pkg/authentication/request/union"
 	"k8s.io/apiserver/pkg/authentication/request/websocket"
 	"k8s.io/apiserver/pkg/authentication/request/x509"
-	x509request "k8s.io/apiserver/pkg/authentication/request/x509"
 	"k8s.io/apiserver/pkg/authentication/token/cache"
 	webhooktoken "k8s.io/apiserver/plugin/pkg/authenticator/token/webhook"
-	authenticationclient "k8s.io/client-go/kubernetes/typed/authentication/v1beta1"
+	authenticationclient "k8s.io/client-go/kubernetes/typed/authentication/v1"
 )
 
 // DelegatingAuthenticatorConfig is the minimal configuration needed to create an authenticator
@@ -44,12 +44,18 @@ type DelegatingAuthenticatorConfig struct {
 	// TokenAccessReviewClient is a client to do token review. It can be nil. Then every token is ignored.
 	TokenAccessReviewClient authenticationclient.TokenReviewInterface
 
+	// WebhookRetryBackoff specifies the backoff parameters for the authentication webhook retry logic.
+	// This allows us to configure the sleep time at each iteration and the maximum number of retries allowed
+	// before we fail the webhook call in order to limit the fan out that ensues when the system is degraded.
+	WebhookRetryBackoff *wait.Backoff
+
 	// CacheTTL is the length of time that a token authentication answer will be cached.
 	CacheTTL time.Duration
 
-	// ClientVerifyOptionFn are the options for verifying incoming connections using mTLS and directly assigning to users.
+	// CAContentProvider are the options for verifying incoming connections using mTLS and directly assigning to users.
 	// Generally this is the CA bundle file used to authenticate client certificates
-	ClientVerifyOptionFn x509request.VerifyOptionFunc
+	// If this is nil, then mTLS will not be used.
+	ClientCertificateCAContentProvider CAContentProvider
 
 	APIAudiences authenticator.Audiences
 
@@ -64,7 +70,7 @@ func (c DelegatingAuthenticatorConfig) New() (authenticator.Request, *spec.Secur
 	// Add the front proxy authenticator if requested
 	if c.RequestHeaderConfig != nil {
 		requestHeaderAuthenticator := headerrequest.NewDynamicVerifyOptionsSecure(
-			c.RequestHeaderConfig.VerifyOptionFn,
+			c.RequestHeaderConfig.CAContentProvider.VerifyOptions,
 			c.RequestHeaderConfig.AllowedClientNames,
 			c.RequestHeaderConfig.UsernameHeaders,
 			c.RequestHeaderConfig.GroupHeaders,
@@ -74,12 +80,15 @@ func (c DelegatingAuthenticatorConfig) New() (authenticator.Request, *spec.Secur
 	}
 
 	// x509 client cert auth
-	if c.ClientVerifyOptionFn != nil {
-		authenticators = append(authenticators, x509.NewDynamic(c.ClientVerifyOptionFn, x509.CommonNameUserConversion))
+	if c.ClientCertificateCAContentProvider != nil {
+		authenticators = append(authenticators, x509.NewDynamic(c.ClientCertificateCAContentProvider.VerifyOptions, x509.CommonNameUserConversion))
 	}
 
 	if c.TokenAccessReviewClient != nil {
-		tokenAuth, err := webhooktoken.NewFromInterface(c.TokenAccessReviewClient, c.APIAudiences)
+		if c.WebhookRetryBackoff == nil {
+			return nil, nil, errors.New("retry backoff parameters for delegating authentication webhook has not been specified")
+		}
+		tokenAuth, err := webhooktoken.NewFromInterface(c.TokenAccessReviewClient, c.APIAudiences, *c.WebhookRetryBackoff)
 		if err != nil {
 			return nil, nil, err
 		}

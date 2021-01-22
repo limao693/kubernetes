@@ -29,12 +29,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/googleapis/gnostic/OpenAPIv2"
 	"github.com/spf13/cobra"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	kubeerr "k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -45,7 +44,6 @@ import (
 	dynamicfakeclient "k8s.io/client-go/dynamic/fake"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/rest/fake"
-	clienttesting "k8s.io/client-go/testing"
 	cmdtesting "k8s.io/kubectl/pkg/cmd/testing"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/scheme"
@@ -54,7 +52,7 @@ import (
 )
 
 var (
-	fakeSchema                 = sptest.Fake{Path: filepath.Join("..", "..", "..", "test", "data", "openapi", "swagger.json")}
+	fakeSchema                 = sptest.Fake{Path: filepath.Join("..", "..", "..", "testdata", "openapi", "swagger.json")}
 	testingOpenAPISchemaFns    = []func() (openapi.Resources, error){nil, AlwaysErrorOpenAPISchemaFn, openAPISchemaFn}
 	AlwaysErrorOpenAPISchemaFn = func() (openapi.Resources, error) {
 		return nil, errors.New("cannot get openapi spec")
@@ -87,23 +85,24 @@ func validateApplyArgs(cmd *cobra.Command, args []string) error {
 }
 
 const (
-	filenameCM                = "../../../test/data/apply/cm.yaml"
-	filenameRC                = "../../../test/data/apply/rc.yaml"
-	filenameRCArgs            = "../../../test/data/apply/rc-args.yaml"
-	filenameRCLastAppliedArgs = "../../../test/data/apply/rc-lastapplied-args.yaml"
-	filenameRCNoAnnotation    = "../../../test/data/apply/rc-no-annotation.yaml"
-	filenameRCLASTAPPLIED     = "../../../test/data/apply/rc-lastapplied.yaml"
-	filenameSVC               = "../../../test/data/apply/service.yaml"
-	filenameRCSVC             = "../../../test/data/apply/rc-service.yaml"
-	filenameNoExistRC         = "../../../test/data/apply/rc-noexist.yaml"
-	filenameRCPatchTest       = "../../../test/data/apply/patch.json"
-	dirName                   = "../../../test/data/apply/testdir"
-	filenameRCJSON            = "../../../test/data/apply/rc.json"
+	filenameCM                = "../../../testdata/apply/cm.yaml"
+	filenameRC                = "../../../testdata/apply/rc.yaml"
+	filenameRCArgs            = "../../../testdata/apply/rc-args.yaml"
+	filenameRCLastAppliedArgs = "../../../testdata/apply/rc-lastapplied-args.yaml"
+	filenameRCNoAnnotation    = "../../../testdata/apply/rc-no-annotation.yaml"
+	filenameRCLASTAPPLIED     = "../../../testdata/apply/rc-lastapplied.yaml"
+	filenameSVC               = "../../../testdata/apply/service.yaml"
+	filenameRCSVC             = "../../../testdata/apply/rc-service.yaml"
+	filenameNoExistRC         = "../../../testdata/apply/rc-noexist.yaml"
+	filenameRCPatchTest       = "../../../testdata/apply/patch.json"
+	dirName                   = "../../../testdata/apply/testdir"
+	filenameRCJSON            = "../../../testdata/apply/rc.json"
+	filenamePodGeneratedName  = "../../../testdata/apply/pod-generated-name.yaml"
 
-	filenameWidgetClientside    = "../../../test/data/apply/widget-clientside.yaml"
-	filenameWidgetServerside    = "../../../test/data/apply/widget-serverside.yaml"
-	filenameDeployObjServerside = "../../../test/data/apply/deploy-serverside.yaml"
-	filenameDeployObjClientside = "../../../test/data/apply/deploy-clientside.yaml"
+	filenameWidgetClientside    = "../../../testdata/apply/widget-clientside.yaml"
+	filenameWidgetServerside    = "../../../testdata/apply/widget-serverside.yaml"
+	filenameDeployObjServerside = "../../../testdata/apply/deploy-serverside.yaml"
+	filenameDeployObjClientside = "../../../testdata/apply/deploy-clientside.yaml"
 )
 
 func readConfigMapList(t *testing.T, filename string) [][]byte {
@@ -315,7 +314,7 @@ func TestRunApplyPrintsValidObjectList(t *testing.T) {
 	cmd := NewCmdApply("kubectl", tf, ioStreams)
 	cmd.Flags().Set("filename", filenameCM)
 	cmd.Flags().Set("output", "json")
-	cmd.Flags().Set("dry-run", "true")
+	cmd.Flags().Set("dry-run", "client")
 	cmd.Run(cmd, []string{})
 
 	// ensure that returned list can be unmarshaled back into a configmap list
@@ -505,7 +504,7 @@ func TestApplyObjectWithoutAnnotation(t *testing.T) {
 
 	// uses the name from the file, not the response
 	expectRC := "replicationcontroller/" + nameRC + "\n"
-	expectWarning := fmt.Sprintf(warningNoLastAppliedConfigAnnotation, "kubectl")
+	expectWarning := fmt.Sprintf(warningNoLastAppliedConfigAnnotation, "replicationcontrollers/test-rc", corev1.LastAppliedConfigAnnotation, "kubectl")
 	if errBuf.String() != expectWarning {
 		t.Fatalf("unexpected non-warning: %s\nexpected: %s", errBuf.String(), expectWarning)
 	}
@@ -554,6 +553,55 @@ func TestApplyObject(t *testing.T) {
 			expectRC := "replicationcontroller/" + nameRC + "\n"
 			if buf.String() != expectRC {
 				t.Fatalf("unexpected output: %s\nexpected: %s", buf.String(), expectRC)
+			}
+			if errBuf.String() != "" {
+				t.Fatalf("unexpected error output: %s", errBuf.String())
+			}
+		})
+	}
+}
+
+func TestApplyPruneObjects(t *testing.T) {
+	cmdtesting.InitTestErrorHandler(t)
+	nameRC, currentRC := readAndAnnotateReplicationController(t, filenameRC)
+	pathRC := "/namespaces/test/replicationcontrollers/" + nameRC
+
+	for _, fn := range testingOpenAPISchemaFns {
+		t.Run("test apply returns correct output", func(t *testing.T) {
+			tf := cmdtesting.NewTestFactory().WithNamespace("test")
+			defer tf.Cleanup()
+
+			tf.UnstructuredClient = &fake.RESTClient{
+				NegotiatedSerializer: resource.UnstructuredPlusDefaultContentConfig().NegotiatedSerializer,
+				Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
+					switch p, m := req.URL.Path, req.Method; {
+					case p == pathRC && m == "GET":
+						bodyRC := ioutil.NopCloser(bytes.NewReader(currentRC))
+						return &http.Response{StatusCode: http.StatusOK, Header: cmdtesting.DefaultHeader(), Body: bodyRC}, nil
+					case p == pathRC && m == "PATCH":
+						validatePatchApplication(t, req)
+						bodyRC := ioutil.NopCloser(bytes.NewReader(currentRC))
+						return &http.Response{StatusCode: http.StatusOK, Header: cmdtesting.DefaultHeader(), Body: bodyRC}, nil
+					default:
+						t.Fatalf("unexpected request: %#v\n%#v", req.URL, req)
+						return nil, nil
+					}
+				}),
+			}
+			tf.OpenAPISchemaFunc = fn
+			tf.ClientConfigVal = cmdtesting.DefaultClientConfig()
+
+			ioStreams, _, buf, errBuf := genericclioptions.NewTestIOStreams()
+			cmd := NewCmdApply("kubectl", tf, ioStreams)
+			cmd.Flags().Set("filename", filenameRC)
+			cmd.Flags().Set("prune", "true")
+			cmd.Flags().Set("namespace", "test")
+			cmd.Flags().Set("output", "yaml")
+			cmd.Flags().Set("all", "true")
+			cmd.Run(cmd, []string{})
+
+			if !strings.Contains(buf.String(), "test-rc") {
+				t.Fatalf("unexpected output: %s\nexpected to contain: %s", buf.String(), "test-rc")
 			}
 			if errBuf.String() != "" {
 				t.Fatalf("unexpected error output: %s", errBuf.String())
@@ -651,7 +699,7 @@ func TestApplyRetry(t *testing.T) {
 					case p == pathRC && m == "PATCH":
 						if firstPatch {
 							firstPatch = false
-							statusErr := kubeerr.NewConflict(schema.GroupResource{Group: "", Resource: "rc"}, "test-rc", fmt.Errorf("the object has been modified. Please apply at first"))
+							statusErr := apierrors.NewConflict(schema.GroupResource{Group: "", Resource: "rc"}, "test-rc", fmt.Errorf("the object has been modified. Please apply at first"))
 							bodyBytes, _ := json.Marshal(statusErr)
 							bodyErr := ioutil.NopCloser(bytes.NewReader(bodyBytes))
 							return &http.Response{StatusCode: http.StatusConflict, Header: cmdtesting.DefaultHeader(), Body: bodyErr}, nil
@@ -709,7 +757,7 @@ func TestApplyNonExistObject(t *testing.T) {
 				return &http.Response{StatusCode: http.StatusNotFound, Header: cmdtesting.DefaultHeader(), Body: ioutil.NopCloser(bytes.NewReader(nil))}, nil
 			case p == pathRC && m == "POST":
 				bodyRC := ioutil.NopCloser(bytes.NewReader(currentRC))
-				return &http.Response{StatusCode: 201, Header: cmdtesting.DefaultHeader(), Body: bodyRC}, nil
+				return &http.Response{StatusCode: http.StatusCreated, Header: cmdtesting.DefaultHeader(), Body: bodyRC}, nil
 			default:
 				t.Fatalf("unexpected request: %#v\n%#v", req.URL, req)
 				return nil, nil
@@ -761,7 +809,7 @@ func TestApplyEmptyPatch(t *testing.T) {
 				body, _ = ioutil.ReadAll(req.Body)
 				verifyPost = true
 				bodyRC := ioutil.NopCloser(bytes.NewReader(body))
-				return &http.Response{StatusCode: 201, Header: cmdtesting.DefaultHeader(), Body: bodyRC}, nil
+				return &http.Response{StatusCode: http.StatusCreated, Header: cmdtesting.DefaultHeader(), Body: bodyRC}, nil
 			default:
 				t.Fatalf("unexpected request: %#v\n%#v", req.URL, req)
 				return nil, nil
@@ -1278,13 +1326,18 @@ func TestForceApply(t *testing.T) {
 					case strings.HasSuffix(p, pathRC) && m == "PATCH":
 						counts["patch"]++
 						if counts["patch"] <= 6 {
-							statusErr := kubeerr.NewConflict(schema.GroupResource{Group: "", Resource: "rc"}, "test-rc", fmt.Errorf("the object has been modified. Please apply at first"))
+							statusErr := apierrors.NewConflict(schema.GroupResource{Group: "", Resource: "rc"}, "test-rc", fmt.Errorf("the object has been modified. Please apply at first"))
 							bodyBytes, _ := json.Marshal(statusErr)
 							bodyErr := ioutil.NopCloser(bytes.NewReader(bodyBytes))
 							return &http.Response{StatusCode: http.StatusConflict, Header: cmdtesting.DefaultHeader(), Body: bodyErr}, nil
 						}
 						t.Fatalf("unexpected request: %#v after %v tries\n%#v", req.URL, counts["patch"], req)
 						return nil, nil
+					case strings.HasSuffix(p, pathRC) && m == "DELETE":
+						counts["delete"]++
+						deleted = true
+						bodyRC := ioutil.NopCloser(bytes.NewReader(currentRC))
+						return &http.Response{StatusCode: http.StatusOK, Header: cmdtesting.DefaultHeader(), Body: bodyRC}, nil
 					case strings.HasSuffix(p, pathRC) && m == "PUT":
 						counts["put"]++
 						bodyRC := ioutil.NopCloser(bytes.NewReader(currentRC))
@@ -1303,16 +1356,6 @@ func TestForceApply(t *testing.T) {
 				}),
 			}
 			fakeDynamicClient := dynamicfakeclient.NewSimpleDynamicClient(scheme)
-			fakeDynamicClient.PrependReactor("delete", "replicationcontrollers", func(action clienttesting.Action) (bool, runtime.Object, error) {
-				if deleteAction, ok := action.(clienttesting.DeleteAction); ok {
-					if deleteAction.GetName() == nameRC {
-						counts["delete"]++
-						deleted = true
-						return true, nil, nil
-					}
-				}
-				return false, nil, nil
-			})
 			tf.FakeDynamicClient = fakeDynamicClient
 			tf.OpenAPISchemaFunc = fn
 			tf.Client = tf.UnstructuredClient
@@ -1341,74 +1384,77 @@ func TestForceApply(t *testing.T) {
 	}
 }
 
-func TestDryRunVerifier(t *testing.T) {
-	dryRunVerifier := DryRunVerifier{
-		Finder: cmdutil.NewCRDFinder(func() ([]schema.GroupKind, error) {
-			return []schema.GroupKind{
-				{
-					Group: "crd.com",
-					Kind:  "MyCRD",
-				},
-				{
-					Group: "crd.com",
-					Kind:  "MyNewCRD",
-				},
-			}, nil
-		}),
-		OpenAPIGetter: &fakeSchema,
-	}
+func TestDontAllowForceApplyWithServerDryRun(t *testing.T) {
+	expectedError := "error: --dry-run=server cannot be used with --force"
 
-	err := dryRunVerifier.HasSupport(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "NodeProxyOptions"})
-	if err == nil {
-		t.Fatalf("NodeProxyOptions doesn't support dry-run, yet no error found")
-	}
+	cmdutil.BehaviorOnFatal(func(str string, code int) {
+		panic(str)
+	})
+	defer func() {
+		actualError := recover()
+		if expectedError != actualError {
+			t.Fatalf(`expected error "%s", but got "%s"`, expectedError, actualError)
+		}
+	}()
 
-	err = dryRunVerifier.HasSupport(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"})
-	if err != nil {
-		t.Fatalf("Pod should support dry-run: %v", err)
-	}
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
+	defer tf.Cleanup()
 
-	err = dryRunVerifier.HasSupport(schema.GroupVersionKind{Group: "crd.com", Version: "v1", Kind: "MyCRD"})
-	if err != nil {
-		t.Fatalf("MyCRD should support dry-run: %v", err)
-	}
+	tf.ClientConfigVal = cmdtesting.DefaultClientConfig()
 
-	err = dryRunVerifier.HasSupport(schema.GroupVersionKind{Group: "crd.com", Version: "v1", Kind: "Random"})
-	if err == nil {
-		t.Fatalf("Random doesn't support dry-run, yet no error found")
-	}
+	ioStreams, _, _, _ := genericclioptions.NewTestIOStreams()
+	cmd := NewCmdApply("kubectl", tf, ioStreams)
+	cmd.Flags().Set("filename", filenameRC)
+	cmd.Flags().Set("dry-run", "server")
+	cmd.Flags().Set("force", "true")
+	cmd.Run(cmd, []string{})
+
+	t.Fatalf(`expected error "%s"`, expectedError)
 }
 
-type EmptyOpenAPI struct{}
+func TestDontAllowForceApplyWithServerSide(t *testing.T) {
+	expectedError := "error: --force cannot be used with --server-side"
 
-func (EmptyOpenAPI) OpenAPISchema() (*openapi_v2.Document, error) {
-	return &openapi_v2.Document{}, nil
+	cmdutil.BehaviorOnFatal(func(str string, code int) {
+		panic(str)
+	})
+	defer func() {
+		actualError := recover()
+		if expectedError != actualError {
+			t.Fatalf(`expected error "%s", but got "%s"`, expectedError, actualError)
+		}
+	}()
+
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
+	defer tf.Cleanup()
+
+	tf.ClientConfigVal = cmdtesting.DefaultClientConfig()
+
+	ioStreams, _, _, _ := genericclioptions.NewTestIOStreams()
+	cmd := NewCmdApply("kubectl", tf, ioStreams)
+	cmd.Flags().Set("filename", filenameRC)
+	cmd.Flags().Set("server-side", "true")
+	cmd.Flags().Set("force", "true")
+	cmd.Run(cmd, []string{})
+
+	t.Fatalf(`expected error "%s"`, expectedError)
 }
 
-func TestDryRunVerifierNoOpenAPI(t *testing.T) {
-	dryRunVerifier := DryRunVerifier{
-		Finder: cmdutil.NewCRDFinder(func() ([]schema.GroupKind, error) {
-			return []schema.GroupKind{
-				{
-					Group: "crd.com",
-					Kind:  "MyCRD",
-				},
-				{
-					Group: "crd.com",
-					Kind:  "MyNewCRD",
-				},
-			}, nil
-		}),
-		OpenAPIGetter: EmptyOpenAPI{},
-	}
+func TestDontAllowApplyWithPodGeneratedName(t *testing.T) {
+	expectedError := "error: from testing-: cannot use generate name with apply"
+	cmdutil.BehaviorOnFatal(func(str string, code int) {
+		if str != expectedError {
+			t.Fatalf(`expected error "%s", but got "%s"`, expectedError, str)
+		}
+	})
 
-	err := dryRunVerifier.HasSupport(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"})
-	if err == nil {
-		t.Fatalf("Pod doesn't support dry-run, yet no error found")
-	}
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
+	defer tf.Cleanup()
+	tf.ClientConfigVal = cmdtesting.DefaultClientConfig()
 
-	err = dryRunVerifier.HasSupport(schema.GroupVersionKind{Group: "crd.com", Version: "v1", Kind: "MyCRD"})
-	if err == nil {
-		t.Fatalf("MyCRD doesn't support dry-run, yet no error found")
-	}
+	ioStreams, _, _, _ := genericclioptions.NewTestIOStreams()
+	cmd := NewCmdApply("kubectl", tf, ioStreams)
+	cmd.Flags().Set("filename", filenamePodGeneratedName)
+	cmd.Flags().Set("dry-run", "client")
+	cmd.Run(cmd, []string{})
 }

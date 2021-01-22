@@ -18,24 +18,23 @@ package imagelocality
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"reflect"
 	"testing"
 
-	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/kubernetes/pkg/scheduler/algorithm/priorities"
-	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/migration"
-	framework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
-	schedulernodeinfo "k8s.io/kubernetes/pkg/scheduler/nodeinfo"
-	schedulertesting "k8s.io/kubernetes/pkg/scheduler/testing"
-	"k8s.io/kubernetes/pkg/util/parsers"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/kubernetes/pkg/scheduler/framework/runtime"
+	"k8s.io/kubernetes/pkg/scheduler/internal/cache"
 )
 
 func TestImageLocalityPriority(t *testing.T) {
 	test40250 := v1.PodSpec{
 		Containers: []v1.Container{
 			{
+
 				Image: "gcr.io/40",
 			},
 			{
@@ -61,7 +60,32 @@ func TestImageLocalityPriority(t *testing.T) {
 				Image: "gcr.io/10",
 			},
 			{
-				Image: "gcr.io/2000",
+				Image: "gcr.io/4000",
+			},
+		},
+	}
+
+	test300600900 := v1.PodSpec{
+		Containers: []v1.Container{
+			{
+				Image: "gcr.io/300",
+			},
+			{
+				Image: "gcr.io/600",
+			},
+			{
+				Image: "gcr.io/900",
+			},
+		},
+	}
+
+	test3040 := v1.PodSpec{
+		Containers: []v1.Container{
+			{
+				Image: "gcr.io/30",
+			},
+			{
+				Image: "gcr.io/40",
 			},
 		},
 	}
@@ -70,7 +94,7 @@ func TestImageLocalityPriority(t *testing.T) {
 		Images: []v1.ContainerImage{
 			{
 				Names: []string{
-					"gcr.io/40:" + parsers.DefaultImageTag,
+					"gcr.io/40:latest",
 					"gcr.io/40:v1",
 					"gcr.io/40:v1",
 				},
@@ -78,14 +102,14 @@ func TestImageLocalityPriority(t *testing.T) {
 			},
 			{
 				Names: []string{
-					"gcr.io/300:" + parsers.DefaultImageTag,
+					"gcr.io/300:latest",
 					"gcr.io/300:v1",
 				},
 				SizeBytes: int64(300 * mb),
 			},
 			{
 				Names: []string{
-					"gcr.io/2000:" + parsers.DefaultImageTag,
+					"gcr.io/2000:latest",
 				},
 				SizeBytes: int64(2000 * mb),
 			},
@@ -96,16 +120,102 @@ func TestImageLocalityPriority(t *testing.T) {
 		Images: []v1.ContainerImage{
 			{
 				Names: []string{
-					"gcr.io/250:" + parsers.DefaultImageTag,
+					"gcr.io/250:latest",
 				},
 				SizeBytes: int64(250 * mb),
 			},
 			{
 				Names: []string{
-					"gcr.io/10:" + parsers.DefaultImageTag,
+					"gcr.io/10:latest",
 					"gcr.io/10:v1",
 				},
 				SizeBytes: int64(10 * mb),
+			},
+		},
+	}
+
+	node60040900 := v1.NodeStatus{
+		Images: []v1.ContainerImage{
+			{
+				Names: []string{
+					"gcr.io/600:latest",
+				},
+				SizeBytes: int64(600 * mb),
+			},
+			{
+				Names: []string{
+					"gcr.io/40:latest",
+				},
+				SizeBytes: int64(40 * mb),
+			},
+			{
+				Names: []string{
+					"gcr.io/900:latest",
+				},
+				SizeBytes: int64(900 * mb),
+			},
+		},
+	}
+
+	node300600900 := v1.NodeStatus{
+		Images: []v1.ContainerImage{
+			{
+				Names: []string{
+					"gcr.io/300:latest",
+				},
+				SizeBytes: int64(300 * mb),
+			},
+			{
+				Names: []string{
+					"gcr.io/600:latest",
+				},
+				SizeBytes: int64(600 * mb),
+			},
+			{
+				Names: []string{
+					"gcr.io/900:latest",
+				},
+				SizeBytes: int64(900 * mb),
+			},
+		},
+	}
+
+	node400030 := v1.NodeStatus{
+		Images: []v1.ContainerImage{
+			{
+				Names: []string{
+					"gcr.io/4000:latest",
+				},
+				SizeBytes: int64(4000 * mb),
+			},
+			{
+				Names: []string{
+					"gcr.io/30:latest",
+				},
+				SizeBytes: int64(30 * mb),
+			},
+		},
+	}
+
+	node203040 := v1.NodeStatus{
+		Images: []v1.ContainerImage{
+			{
+				Names: []string{
+					"gcr.io/20:latest",
+				},
+				SizeBytes: int64(20 * mb),
+			},
+			{
+				Names: []string{
+					"gcr.io/30:latest",
+				},
+				SizeBytes: int64(30 * mb),
+			},
+			{
+				Names: []string{
+					"gcr.io/40:latest",
+				},
+				SizeBytes: int64(40 * mb),
 			},
 		},
 	}
@@ -128,10 +238,10 @@ func TestImageLocalityPriority(t *testing.T) {
 
 			// Node2
 			// Image: gcr.io/250:latest 250MB
-			// Score: 100 * (250M/2 - 23M)/(1000M - 23M) = 100
+			// Score: 100 * (250M/2 - 23M)/(1000M * 2 - 23M) = 5
 			pod:          &v1.Pod{Spec: test40250},
 			nodes:        []*v1.Node{makeImageNode("machine1", node403002000), makeImageNode("machine2", node25010)},
-			expectedList: []framework.NodeScore{{Name: "machine1", Score: 0}, {Name: "machine2", Score: 10}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: 0}, {Name: "machine2", Score: 5}},
 			name:         "two images spread on two nodes, prefer the larger image one",
 		},
 		{
@@ -139,70 +249,93 @@ func TestImageLocalityPriority(t *testing.T) {
 
 			// Node1
 			// Image: gcr.io/40:latest 40MB, gcr.io/300:latest 300MB
-			// Score: 100 * ((40M + 300M)/2 - 23M)/(1000M - 23M) = 15
+			// Score: 100 * ((40M + 300M)/2 - 23M)/(1000M * 2 - 23M) = 7
 
 			// Node2
 			// Image: not present
 			// Score: 0
 			pod:          &v1.Pod{Spec: test40300},
 			nodes:        []*v1.Node{makeImageNode("machine1", node403002000), makeImageNode("machine2", node25010)},
-			expectedList: []framework.NodeScore{{Name: "machine1", Score: 15}, {Name: "machine2", Score: 0}},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: 7}, {Name: "machine2", Score: 0}},
 			name:         "two images on one node, prefer this node",
 		},
 		{
-			// Pod: gcr.io/2000 gcr.io/10
+			// Pod: gcr.io/4000 gcr.io/10
 
 			// Node1
-			// Image: gcr.io/2000:latest 2000MB
-			// Score: 100 (2000M/2 >= 1000M, max-threshold)
+			// Image: gcr.io/4000:latest 2000MB
+			// Score: 100 (4000 * 1/2 >= 1000M * 2, max-threshold)
 
 			// Node2
 			// Image: gcr.io/10:latest 10MB
 			// Score: 0 (10M/2 < 23M, min-threshold)
 			pod:          &v1.Pod{Spec: testMinMax},
-			nodes:        []*v1.Node{makeImageNode("machine1", node403002000), makeImageNode("machine2", node25010)},
+			nodes:        []*v1.Node{makeImageNode("machine1", node400030), makeImageNode("machine2", node25010)},
 			expectedList: []framework.NodeScore{{Name: "machine1", Score: framework.MaxNodeScore}, {Name: "machine2", Score: 0}},
 			name:         "if exceed limit, use limit",
 		},
 		{
-			// Pod: gcr.io/2000 gcr.io/10
+			// Pod: gcr.io/4000 gcr.io/10
 
 			// Node1
-			// Image: gcr.io/2000:latest 2000MB
-			// Score: 100 * (2000M/3 - 23M)/(1000M - 23M) = 65
+			// Image: gcr.io/4000:latest 4000MB
+			// Score: 100 * (4000M/3 - 23M)/(1000M * 2 - 23M) = 66
 
 			// Node2
 			// Image: gcr.io/10:latest 10MB
-			// Score: 0 (10M/2 < 23M, min-threshold)
+			// Score: 0 (10M*1/3 < 23M, min-threshold)
 
 			// Node3
 			// Image:
 			// Score: 0
 			pod:          &v1.Pod{Spec: testMinMax},
-			nodes:        []*v1.Node{makeImageNode("machine1", node403002000), makeImageNode("machine2", node25010), makeImageNode("machine3", nodeWithNoImages)},
-			expectedList: []framework.NodeScore{{Name: "machine1", Score: 65}, {Name: "machine2", Score: 0}, {Name: "machine3", Score: 0}},
+			nodes:        []*v1.Node{makeImageNode("machine1", node400030), makeImageNode("machine2", node25010), makeImageNode("machine3", nodeWithNoImages)},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: 66}, {Name: "machine2", Score: 0}, {Name: "machine3", Score: 0}},
 			name:         "if exceed limit, use limit (with node which has no images present)",
+		},
+		{
+			// Pod: gcr.io/300 gcr.io/600 gcr.io/900
+
+			// Node1
+			// Image: gcr.io/600:latest 600MB, gcr.io/900:latest 900MB
+			// Score: 100 * (600M * 2/3 + 900M * 2/3 - 23M) / (1000M * 3 - 23M) = 32
+
+			// Node2
+			// Image: gcr.io/300:latest 300MB, gcr.io/600:latest 600MB, gcr.io/900:latest 900MB
+			// Score: 100 * (300M * 1/3 + 600M * 2/3 + 900M * 2/3 - 23M) / (1000M *3 - 23M) = 36
+
+			// Node3
+			// Image:
+			// Score: 0
+			pod:          &v1.Pod{Spec: test300600900},
+			nodes:        []*v1.Node{makeImageNode("machine1", node60040900), makeImageNode("machine2", node300600900), makeImageNode("machine3", nodeWithNoImages)},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: 32}, {Name: "machine2", Score: 36}, {Name: "machine3", Score: 0}},
+			name:         "pod with multiple large images, machine2 is preferred",
+		},
+		{
+			// Pod: gcr.io/30 gcr.io/40
+
+			// Node1
+			// Image: gcr.io/20:latest 20MB, gcr.io/30:latest 30MB gcr.io/40:latest 40MB
+			// Score: 100 * (30M + 40M * 1/2 - 23M) / (1000M * 2 - 23M) = 1
+
+			// Node2
+			// Image: 100 * (30M - 23M) / (1000M * 2 - 23M) = 0
+			// Score: 0
+			pod:          &v1.Pod{Spec: test3040},
+			nodes:        []*v1.Node{makeImageNode("machine1", node203040), makeImageNode("machine2", node400030)},
+			expectedList: []framework.NodeScore{{Name: "machine1", Score: 1}, {Name: "machine2", Score: 0}},
+			name:         "pod with multiple small images",
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			metaDataProducer := priorities.NewPriorityMetadataFactory(
-				schedulertesting.FakeServiceLister([]*v1.Service{}),
-				schedulertesting.FakeControllerLister([]*v1.ReplicationController{}),
-				schedulertesting.FakeReplicaSetLister([]*apps.ReplicaSet{}),
-				schedulertesting.FakeStatefulSetLister([]*apps.StatefulSet{}))
-
-			nodeNameToInfo := schedulernodeinfo.CreateNodeNameToInfoMap(nil, test.nodes)
-
-			meta := metaDataProducer(test.pod, nodeNameToInfo)
+			snapshot := cache.NewSnapshot(nil, test.nodes)
 
 			state := framework.NewCycleState()
-			state.Write(migration.PrioritiesStateKey, &migration.PrioritiesStateData{Reference: meta})
 
-			fh, _ := framework.NewFramework(nil, nil, nil)
-			snapshot := fh.NodeInfoSnapshot()
-			snapshot.NodeInfoMap = schedulernodeinfo.CreateNodeNameToInfoMap(nil, test.nodes)
+			fh, _ := runtime.NewFramework(nil, nil, nil, runtime.WithSnapshotSharedLister(snapshot))
 
 			p, _ := New(nil, fh)
 			var gotList framework.NodeScoreList
@@ -222,9 +355,34 @@ func TestImageLocalityPriority(t *testing.T) {
 	}
 }
 
+func TestNormalizedImageName(t *testing.T) {
+	for _, testCase := range []struct {
+		Name   string
+		Input  string
+		Output string
+	}{
+		{Name: "add :latest postfix 1", Input: "root", Output: "root:latest"},
+		{Name: "add :latest postfix 2", Input: "gcr.io:5000/root", Output: "gcr.io:5000/root:latest"},
+		{Name: "keep it as is 1", Input: "root:tag", Output: "root:tag"},
+		{Name: "keep it as is 2", Input: "root@" + getImageFakeDigest("root"), Output: "root@" + getImageFakeDigest("root")},
+	} {
+		t.Run(testCase.Name, func(t *testing.T) {
+			image := normalizedImageName(testCase.Input)
+			if image != testCase.Output {
+				t.Errorf("expected image reference: %q, got %q", testCase.Output, image)
+			}
+		})
+	}
+}
+
 func makeImageNode(node string, status v1.NodeStatus) *v1.Node {
 	return &v1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: node},
 		Status:     status,
 	}
+}
+
+func getImageFakeDigest(fakeContent string) string {
+	hash := sha256.Sum256([]byte(fakeContent))
+	return "sha256:" + hex.EncodeToString(hash[:])
 }

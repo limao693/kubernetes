@@ -17,8 +17,9 @@ limitations under the License.
 package storage
 
 import (
+	"context"
+
 	"github.com/onsi/ginkgo"
-	"github.com/onsi/gomega"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -29,6 +30,7 @@ import (
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	"k8s.io/kubernetes/test/e2e/framework/providers/gce"
 	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
+	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	"k8s.io/kubernetes/test/e2e/storage/utils"
 )
 
@@ -42,11 +44,11 @@ func verifyGCEDiskAttached(diskName string, nodeName types.NodeName) bool {
 }
 
 // initializeGCETestSpec creates a PV, PVC, and ClientPod that will run until killed by test or clean up.
-func initializeGCETestSpec(c clientset.Interface, ns string, pvConfig e2epv.PersistentVolumeConfig, pvcConfig e2epv.PersistentVolumeClaimConfig, isPrebound bool) (*v1.Pod, *v1.PersistentVolume, *v1.PersistentVolumeClaim) {
+func initializeGCETestSpec(c clientset.Interface, t *framework.TimeoutContext, ns string, pvConfig e2epv.PersistentVolumeConfig, pvcConfig e2epv.PersistentVolumeClaimConfig, isPrebound bool) (*v1.Pod, *v1.PersistentVolume, *v1.PersistentVolumeClaim) {
 	ginkgo.By("Creating the PV and PVC")
 	pv, pvc, err := e2epv.CreatePVPVC(c, pvConfig, pvcConfig, ns, isPrebound)
 	framework.ExpectNoError(err)
-	framework.ExpectNoError(e2epv.WaitOnPVandPVC(c, ns, pv, pvc))
+	framework.ExpectNoError(e2epv.WaitOnPVandPVC(c, t, ns, pv, pvc))
 
 	ginkgo.By("Creating the Client Pod")
 	clientPod, err := e2epod.CreateClientPod(c, ns, pvc)
@@ -80,7 +82,7 @@ var _ = utils.SIGDescribe("PersistentVolumes GCEPD", func() {
 		volLabel = labels.Set{e2epv.VolumeSelectorKey: ns}
 		selector = metav1.SetAsLabelSelector(volLabel)
 
-		framework.SkipUnlessProviderIs("gce", "gke")
+		e2eskipper.SkipUnlessProviderIs("gce", "gke")
 		ginkgo.By("Initializing Test Spec")
 		diskName, err = e2epv.CreatePDWithRetry()
 		framework.ExpectNoError(err)
@@ -101,7 +103,7 @@ var _ = utils.SIGDescribe("PersistentVolumes GCEPD", func() {
 			Selector:         selector,
 			StorageClassName: &emptyStorageClass,
 		}
-		clientPod, pv, pvc = initializeGCETestSpec(c, ns, pvConfig, pvcConfig, false)
+		clientPod, pv, pvc = initializeGCETestSpec(c, f.Timeouts, ns, pvConfig, pvcConfig, false)
 		node = types.NodeName(clientPod.Spec.NodeName)
 	})
 
@@ -125,7 +127,7 @@ var _ = utils.SIGDescribe("PersistentVolumes GCEPD", func() {
 
 		ginkgo.By("Deleting the Claim")
 		framework.ExpectNoError(e2epv.DeletePersistentVolumeClaim(c, pvc.Name, ns), "Unable to delete PVC ", pvc.Name)
-		gomega.Expect(verifyGCEDiskAttached(diskName, node)).To(gomega.BeTrue())
+		framework.ExpectEqual(verifyGCEDiskAttached(diskName, node), true)
 
 		ginkgo.By("Deleting the Pod")
 		framework.ExpectNoError(e2epod.DeletePodWithWait(c, clientPod), "Failed to delete pod ", clientPod.Name)
@@ -140,7 +142,7 @@ var _ = utils.SIGDescribe("PersistentVolumes GCEPD", func() {
 
 		ginkgo.By("Deleting the Persistent Volume")
 		framework.ExpectNoError(e2epv.DeletePersistentVolume(c, pv.Name), "Failed to delete PV ", pv.Name)
-		gomega.Expect(verifyGCEDiskAttached(diskName, node)).To(gomega.BeTrue())
+		framework.ExpectEqual(verifyGCEDiskAttached(diskName, node), true)
 
 		ginkgo.By("Deleting the client pod")
 		framework.ExpectNoError(e2epod.DeletePodWithWait(c, clientPod), "Failed to delete pod ", clientPod.Name)
@@ -153,11 +155,12 @@ var _ = utils.SIGDescribe("PersistentVolumes GCEPD", func() {
 	ginkgo.It("should test that deleting the Namespace of a PVC and Pod causes the successful detach of Persistent Disk", func() {
 
 		ginkgo.By("Deleting the Namespace")
-		err := c.CoreV1().Namespaces().Delete(ns, nil)
+		err := c.CoreV1().Namespaces().Delete(context.TODO(), ns, metav1.DeleteOptions{})
 		framework.ExpectNoError(err)
 
-		err = framework.WaitForNamespacesDeleted(c, []string{ns}, framework.DefaultNamespaceDeletionTimeout)
-		framework.ExpectNoError(err)
+		// issue deletes for the client pod and claim, accelerating namespace controller actions
+		e2epod.DeletePodOrFail(c, clientPod.Namespace, clientPod.Name)
+		framework.ExpectNoError(e2epv.DeletePersistentVolumeClaim(c, pvc.Name, ns), "Unable to delete PVC ", pvc.Name)
 
 		ginkgo.By("Verifying Persistent Disk detaches")
 		framework.ExpectNoError(waitForPDDetach(diskName, node), "PD ", diskName, " did not detach")

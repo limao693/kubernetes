@@ -17,8 +17,10 @@ limitations under the License.
 package pkiutil
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/elliptic"
 	cryptorand "crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -35,6 +37,7 @@ import (
 
 	"github.com/pkg/errors"
 
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation"
 	certutil "k8s.io/client-go/util/cert"
 	"k8s.io/client-go/util/keyutil"
@@ -56,14 +59,20 @@ const (
 	rsaKeySize             = 2048
 )
 
+// CertConfig is a wrapper around certutil.Config extending it with PublicKeyAlgorithm.
+type CertConfig struct {
+	certutil.Config
+	PublicKeyAlgorithm x509.PublicKeyAlgorithm
+}
+
 // NewCertificateAuthority creates new certificate and private key for the certificate authority
-func NewCertificateAuthority(config *certutil.Config) (*x509.Certificate, crypto.Signer, error) {
-	key, err := NewPrivateKey()
+func NewCertificateAuthority(config *CertConfig) (*x509.Certificate, crypto.Signer, error) {
+	key, err := NewPrivateKey(config.PublicKeyAlgorithm)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "unable to create private key while generating CA certificate")
 	}
 
-	cert, err := certutil.NewSelfSignedCACert(*config, key)
+	cert, err := certutil.NewSelfSignedCACert(config.Config, key)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "unable to create self-signed CA certificate")
 	}
@@ -71,14 +80,33 @@ func NewCertificateAuthority(config *certutil.Config) (*x509.Certificate, crypto
 	return cert, key, nil
 }
 
+// NewIntermediateCertificateAuthority creates new certificate and private key for an intermediate certificate authority
+func NewIntermediateCertificateAuthority(parentCert *x509.Certificate, parentKey crypto.Signer, config *CertConfig) (*x509.Certificate, crypto.Signer, error) {
+	key, err := NewPrivateKey(config.PublicKeyAlgorithm)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "unable to create private key while generating intermediate CA certificate")
+	}
+
+	cert, err := NewSignedCert(config, key, parentCert, parentKey, true)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "unable to sign intermediate CA certificate")
+	}
+
+	return cert, key, nil
+}
+
 // NewCertAndKey creates new certificate and key by passing the certificate authority certificate and key
-func NewCertAndKey(caCert *x509.Certificate, caKey crypto.Signer, config *certutil.Config) (*x509.Certificate, crypto.Signer, error) {
-	key, err := NewPrivateKey()
+func NewCertAndKey(caCert *x509.Certificate, caKey crypto.Signer, config *CertConfig) (*x509.Certificate, crypto.Signer, error) {
+	if len(config.Usages) == 0 {
+		return nil, nil, errors.New("must specify at least one ExtKeyUsage")
+	}
+
+	key, err := NewPrivateKey(config.PublicKeyAlgorithm)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "unable to create private key")
 	}
 
-	cert, err := NewSignedCert(config, key, caCert, caKey)
+	cert, err := NewSignedCert(config, key, caCert, caKey, false)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "unable to sign certificate")
 	}
@@ -87,8 +115,8 @@ func NewCertAndKey(caCert *x509.Certificate, caKey crypto.Signer, config *certut
 }
 
 // NewCSRAndKey generates a new key and CSR and that could be signed to create the given certificate
-func NewCSRAndKey(config *certutil.Config) (*x509.CertificateRequest, crypto.Signer, error) {
-	key, err := NewPrivateKey()
+func NewCSRAndKey(config *CertConfig) (*x509.CertificateRequest, crypto.Signer, error) {
+	key, err := NewPrivateKey(config.PublicKeyAlgorithm)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "unable to create private key")
 	}
@@ -129,6 +157,26 @@ func WriteCert(pkiPath, name string, cert *x509.Certificate) error {
 	certificatePath := pathForCert(pkiPath, name)
 	if err := certutil.WriteCert(certificatePath, EncodeCertPEM(cert)); err != nil {
 		return errors.Wrapf(err, "unable to write certificate to file %s", certificatePath)
+	}
+
+	return nil
+}
+
+// WriteCertBundle stores the given certificate bundle at the given location
+func WriteCertBundle(pkiPath, name string, certs []*x509.Certificate) error {
+	for i, cert := range certs {
+		if cert == nil {
+			return errors.Errorf("found nil certificate at position %d when writing bundle to file", i)
+		}
+	}
+
+	certificatePath := pathForCert(pkiPath, name)
+	encoded, err := EncodeCertBundlePEM(certs)
+	if err != nil {
+		return errors.Wrapf(err, "unable to marshal certificate bundle to PEM")
+	}
+	if err := certutil.WriteCert(certificatePath, encoded); err != nil {
+		return errors.Wrapf(err, "unable to write certificate bundle to file %s", certificatePath)
 	}
 
 	return nil
@@ -232,7 +280,7 @@ func TryLoadCertAndKeyFromDisk(pkiPath, name string) (*x509.Certificate, crypto.
 	return cert, key, nil
 }
 
-// TryLoadCertFromDisk tries to load the cert from the disk and validates that it is valid
+// TryLoadCertFromDisk tries to load the cert from the disk
 func TryLoadCertFromDisk(pkiPath, name string) (*x509.Certificate, error) {
 	certificatePath := pathForCert(pkiPath, name)
 
@@ -245,16 +293,22 @@ func TryLoadCertFromDisk(pkiPath, name string) (*x509.Certificate, error) {
 	// TODO: Support multiple certs here in order to be able to rotate certs
 	cert := certs[0]
 
-	// Check so that the certificate is valid now
-	now := time.Now()
-	if now.Before(cert.NotBefore) {
-		return nil, errors.New("the certificate is not valid yet")
-	}
-	if now.After(cert.NotAfter) {
-		return nil, errors.New("the certificate has expired")
+	return cert, nil
+}
+
+// TryLoadCertChainFromDisk tries to load the cert chain from the disk
+func TryLoadCertChainFromDisk(pkiPath, name string) (*x509.Certificate, []*x509.Certificate, error) {
+	certificatePath := pathForCert(pkiPath, name)
+
+	certs, err := certutil.CertsFromFile(certificatePath)
+	if err != nil {
+		return nil, nil, errors.Wrapf(err, "couldn't load the certificate file %s", certificatePath)
 	}
 
-	return cert, nil
+	cert := certs[0]
+	intermediates := certs[1:]
+
+	return cert, intermediates, nil
 }
 
 // TryLoadKeyFromDisk tries to load the key from the disk and validates that it is valid
@@ -283,16 +337,14 @@ func TryLoadKeyFromDisk(pkiPath, name string) (crypto.Signer, error) {
 
 // TryLoadCSRAndKeyFromDisk tries to load the CSR and key from the disk
 func TryLoadCSRAndKeyFromDisk(pkiPath, name string) (*x509.CertificateRequest, crypto.Signer, error) {
-	csrPath := pathForCSR(pkiPath, name)
-
-	csr, err := CertificateRequestFromFile(csrPath)
+	csr, err := TryLoadCSRFromDisk(pkiPath, name)
 	if err != nil {
-		return nil, nil, errors.Wrapf(err, "couldn't load the certificate request %s", csrPath)
+		return nil, nil, errors.Wrap(err, "could not load CSR file")
 	}
 
 	key, err := TryLoadKeyFromDisk(pkiPath, name)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "couldn't load key file")
+		return nil, nil, errors.Wrap(err, "could not load key file")
 	}
 
 	return csr, key, nil
@@ -325,6 +377,18 @@ func TryLoadPrivatePublicKeyFromDisk(pkiPath, name string) (*rsa.PrivateKey, *rs
 	p := pubKeys[0].(*rsa.PublicKey)
 
 	return k, p, nil
+}
+
+// TryLoadCSRFromDisk tries to load the CSR from the disk
+func TryLoadCSRFromDisk(pkiPath, name string) (*x509.CertificateRequest, error) {
+	csrPath := pathForCSR(pkiPath, name)
+
+	csr, err := CertificateRequestFromFile(csrPath)
+	if err != nil {
+		return nil, errors.Wrapf(err, "could not load the CSR %s", csrPath)
+	}
+
+	return csr, nil
 }
 
 // PathsForCertAndKey returns the paths for the certificate and key given the path and basename.
@@ -496,7 +560,7 @@ func CertificateRequestFromFile(file string) (*x509.CertificateRequest, error) {
 }
 
 // NewCSR creates a new CSR
-func NewCSR(cfg certutil.Config, key crypto.Signer) (*x509.CertificateRequest, error) {
+func NewCSR(cfg CertConfig, key crypto.Signer) (*x509.CertificateRequest, error) {
 	template := &x509.CertificateRequest{
 		Subject: pkix.Name{
 			CommonName:   cfg.CommonName,
@@ -524,6 +588,24 @@ func EncodeCertPEM(cert *x509.Certificate) []byte {
 	return pem.EncodeToMemory(&block)
 }
 
+// EncodeCertBundlePEM returns PEM-endcoded certificate bundle
+func EncodeCertBundlePEM(certs []*x509.Certificate) ([]byte, error) {
+	buf := bytes.Buffer{}
+
+	block := pem.Block{
+		Type: CertificateBlockType,
+	}
+
+	for _, cert := range certs {
+		block.Bytes = cert.Raw
+		if err := pem.Encode(&buf, &block); err != nil {
+			return nil, err
+		}
+	}
+
+	return buf.Bytes(), nil
+}
+
 // EncodePublicKeyPEM returns PEM-encoded public data
 func EncodePublicKeyPEM(key crypto.PublicKey) ([]byte, error) {
 	der, err := x509.MarshalPKIXPublicKey(key)
@@ -538,12 +620,16 @@ func EncodePublicKeyPEM(key crypto.PublicKey) ([]byte, error) {
 }
 
 // NewPrivateKey creates an RSA private key
-func NewPrivateKey() (crypto.Signer, error) {
+func NewPrivateKey(keyType x509.PublicKeyAlgorithm) (crypto.Signer, error) {
+	if keyType == x509.ECDSA {
+		return ecdsa.GenerateKey(elliptic.P256(), cryptorand.Reader)
+	}
+
 	return rsa.GenerateKey(cryptorand.Reader, rsaKeySize)
 }
 
 // NewSignedCert creates a signed certificate using the given CA certificate and key
-func NewSignedCert(cfg *certutil.Config, key crypto.Signer, caCert *x509.Certificate, caKey crypto.Signer) (*x509.Certificate, error) {
+func NewSignedCert(cfg *CertConfig, key crypto.Signer, caCert *x509.Certificate, caKey crypto.Signer, isCA bool) (*x509.Certificate, error) {
 	serial, err := cryptorand.Int(cryptorand.Reader, new(big.Int).SetInt64(math.MaxInt64))
 	if err != nil {
 		return nil, err
@@ -551,26 +637,91 @@ func NewSignedCert(cfg *certutil.Config, key crypto.Signer, caCert *x509.Certifi
 	if len(cfg.CommonName) == 0 {
 		return nil, errors.New("must specify a CommonName")
 	}
-	if len(cfg.Usages) == 0 {
-		return nil, errors.New("must specify at least one ExtKeyUsage")
+
+	keyUsage := x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature
+	if isCA {
+		keyUsage |= x509.KeyUsageCertSign
 	}
+
+	RemoveDuplicateAltNames(&cfg.AltNames)
 
 	certTmpl := x509.Certificate{
 		Subject: pkix.Name{
 			CommonName:   cfg.CommonName,
 			Organization: cfg.Organization,
 		},
-		DNSNames:     cfg.AltNames.DNSNames,
-		IPAddresses:  cfg.AltNames.IPs,
-		SerialNumber: serial,
-		NotBefore:    caCert.NotBefore,
-		NotAfter:     time.Now().Add(kubeadmconstants.CertificateValidity).UTC(),
-		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  cfg.Usages,
+		DNSNames:              cfg.AltNames.DNSNames,
+		IPAddresses:           cfg.AltNames.IPs,
+		SerialNumber:          serial,
+		NotBefore:             caCert.NotBefore,
+		NotAfter:              time.Now().Add(kubeadmconstants.CertificateValidity).UTC(),
+		KeyUsage:              keyUsage,
+		ExtKeyUsage:           cfg.Usages,
+		BasicConstraintsValid: true,
+		IsCA:                  isCA,
 	}
 	certDERBytes, err := x509.CreateCertificate(cryptorand.Reader, &certTmpl, caCert, key.Public(), caKey)
 	if err != nil {
 		return nil, err
 	}
 	return x509.ParseCertificate(certDERBytes)
+}
+
+// RemoveDuplicateAltNames removes duplicate items in altNames.
+func RemoveDuplicateAltNames(altNames *certutil.AltNames) {
+	if altNames == nil {
+		return
+	}
+
+	if altNames.DNSNames != nil {
+		altNames.DNSNames = sets.NewString(altNames.DNSNames...).List()
+	}
+
+	ipsKeys := make(map[string]struct{})
+	var ips []net.IP
+	for _, one := range altNames.IPs {
+		if _, ok := ipsKeys[one.String()]; !ok {
+			ipsKeys[one.String()] = struct{}{}
+			ips = append(ips, one)
+		}
+	}
+	altNames.IPs = ips
+}
+
+// ValidateCertPeriod checks if the certificate is valid relative to the current time
+// (+/- offset)
+func ValidateCertPeriod(cert *x509.Certificate, offset time.Duration) error {
+	period := fmt.Sprintf("NotBefore: %v, NotAfter: %v", cert.NotBefore, cert.NotAfter)
+	now := time.Now().Add(offset)
+	if now.Before(cert.NotBefore) {
+		return errors.Errorf("the certificate is not valid yet: %s", period)
+	}
+	if now.After(cert.NotAfter) {
+		return errors.Errorf("the certificate has expired: %s", period)
+	}
+	return nil
+}
+
+// VerifyCertChain verifies that a certificate has a valid chain of
+// intermediate CAs back to the root CA
+func VerifyCertChain(cert *x509.Certificate, intermediates []*x509.Certificate, root *x509.Certificate) error {
+	rootPool := x509.NewCertPool()
+	rootPool.AddCert(root)
+
+	intermediatePool := x509.NewCertPool()
+	for _, c := range intermediates {
+		intermediatePool.AddCert(c)
+	}
+
+	verifyOptions := x509.VerifyOptions{
+		Roots:         rootPool,
+		Intermediates: intermediatePool,
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+	}
+
+	if _, err := cert.Verify(verifyOptions); err != nil {
+		return err
+	}
+
+	return nil
 }

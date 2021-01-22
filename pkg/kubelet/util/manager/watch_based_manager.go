@@ -14,13 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// TODO: We did some scalability tests and using watchBasedManager
-// seems to help with apiserver performance at scale visibly.
-// No issues we also observed at the scale of ~200k watchers with a
-// single apiserver.
-// However, we need to perform more extensive testing before we
-// enable this in production setups.
-
 package manager
 
 import (
@@ -30,6 +23,8 @@ import (
 
 	"k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/cache"
+
+	"k8s.io/klog/v2"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -44,13 +39,30 @@ import (
 type listObjectFunc func(string, metav1.ListOptions) (runtime.Object, error)
 type watchObjectFunc func(string, metav1.ListOptions) (watch.Interface, error)
 type newObjectFunc func() runtime.Object
+type isImmutableFunc func(runtime.Object) bool
 
 // objectCacheItem is a single item stored in objectCache.
 type objectCacheItem struct {
 	refCount  int
 	store     cache.Store
 	hasSynced func() (bool, error)
-	stopCh    chan struct{}
+
+	// lock is protecting from closing stopCh multiple times.
+	lock   sync.Mutex
+	stopCh chan struct{}
+}
+
+func (i *objectCacheItem) stop() bool {
+	i.lock.Lock()
+	defer i.lock.Unlock()
+	select {
+	case <-i.stopCh:
+		// This means that channel is already closed.
+		return false
+	default:
+		close(i.stopCh)
+		return true
+	}
 }
 
 // objectCache is a local cache of objects propagated via
@@ -59,6 +71,7 @@ type objectCache struct {
 	listObject    listObjectFunc
 	watchObject   watchObjectFunc
 	newObject     newObjectFunc
+	isImmutable   isImmutableFunc
 	groupResource schema.GroupResource
 
 	lock  sync.RWMutex
@@ -66,11 +79,17 @@ type objectCache struct {
 }
 
 // NewObjectCache returns a new watch-based instance of Store interface.
-func NewObjectCache(listObject listObjectFunc, watchObject watchObjectFunc, newObject newObjectFunc, groupResource schema.GroupResource) Store {
+func NewObjectCache(
+	listObject listObjectFunc,
+	watchObject watchObjectFunc,
+	newObject newObjectFunc,
+	isImmutable isImmutableFunc,
+	groupResource schema.GroupResource) Store {
 	return &objectCache{
 		listObject:    listObject,
 		watchObject:   watchObject,
 		newObject:     newObject,
+		isImmutable:   isImmutable,
 		groupResource: groupResource,
 		items:         make(map[objectKey]*objectCacheItem),
 	}
@@ -140,7 +159,7 @@ func (c *objectCache) DeleteReference(namespace, name string) {
 		item.refCount--
 		if item.refCount == 0 {
 			// Stop the underlying reflector.
-			close(item.stopCh)
+			item.stop()
 			delete(c.items, key)
 		}
 	}
@@ -177,6 +196,21 @@ func (c *objectCache) Get(namespace, name string) (runtime.Object, error) {
 		return nil, apierrors.NewNotFound(c.groupResource, name)
 	}
 	if object, ok := obj.(runtime.Object); ok {
+		// If the returned object is immutable, stop the reflector.
+		//
+		// NOTE: we may potentially not even start the reflector if the object is
+		// already immutable. However, given that:
+		// - we want to also handle the case when object is marked as immutable later
+		// - Secrets and ConfigMaps are periodically fetched by volumemanager anyway
+		// - doing that wouldn't provide visible scalability/performance gain - we
+		//   already have it from here
+		// - doing that would require significant refactoring to reflector
+		// we limit ourselves to just quickly stop the reflector here.
+		if c.isImmutable(object) {
+			if item.stop() {
+				klog.V(4).Infof("Stopped watching for changes of %q/%q - object is immutable", namespace, name)
+			}
+		}
 		return object, nil
 	}
 	return nil, fmt.Errorf("unexpected object type: %v", obj)
@@ -188,7 +222,13 @@ func (c *objectCache) Get(namespace, name string) (runtime.Object, error) {
 // - whenever a pod is created or updated, we start individual watches for all
 //   referenced objects that aren't referenced from other registered pods
 // - every GetObject() returns a value from local cache propagated via watches
-func NewWatchBasedManager(listObject listObjectFunc, watchObject watchObjectFunc, newObject newObjectFunc, groupResource schema.GroupResource, getReferencedObjects func(*v1.Pod) sets.String) Manager {
-	objectStore := NewObjectCache(listObject, watchObject, newObject, groupResource)
+func NewWatchBasedManager(
+	listObject listObjectFunc,
+	watchObject watchObjectFunc,
+	newObject newObjectFunc,
+	isImmutable isImmutableFunc,
+	groupResource schema.GroupResource,
+	getReferencedObjects func(*v1.Pod) sets.String) Manager {
+	objectStore := NewObjectCache(listObject, watchObject, newObject, isImmutable, groupResource)
 	return NewCacheBasedManager(objectStore, getReferencedObjects)
 }

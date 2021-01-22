@@ -35,8 +35,10 @@ import (
 var (
 	etcdRequestLatency = compbasemetrics.NewHistogramVec(
 		&compbasemetrics.HistogramOpts{
-			Name:           "etcd_request_duration_seconds",
-			Help:           "Etcd request latency in seconds for each operation and object type.",
+			Name: "etcd_request_duration_seconds",
+			Help: "Etcd request latency in seconds for each operation and object type.",
+			// Etcd request latency in seconds for each operation and object type.
+			Buckets:        []float64{0.005, 0.025, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 15.0, 30.0, 60.0},
 			StabilityLevel: compbasemetrics.ALPHA,
 		},
 		[]string{"operation", "type"},
@@ -49,14 +51,30 @@ var (
 		},
 		[]string{"resource"},
 	)
-
-	deprecatedEtcdRequestLatenciesSummary = compbasemetrics.NewSummaryVec(
-		&compbasemetrics.SummaryOpts{
-			Name:           "etcd_request_latencies_summary",
-			Help:           "(Deprecated) Etcd request latency summary in microseconds for each operation and object type.",
+	dbTotalSize = compbasemetrics.NewGaugeVec(
+		&compbasemetrics.GaugeOpts{
+			Name:           "etcd_db_total_size_in_bytes",
+			Help:           "Total size of the etcd database file physically allocated in bytes.",
 			StabilityLevel: compbasemetrics.ALPHA,
 		},
-		[]string{"operation", "type"},
+		[]string{"endpoint"},
+	)
+	etcdBookmarkCounts = compbasemetrics.NewGaugeVec(
+		&compbasemetrics.GaugeOpts{
+			Name:           "etcd_bookmark_counts",
+			Help:           "Number of etcd bookmarks (progress notify events) split by kind.",
+			StabilityLevel: compbasemetrics.ALPHA,
+		},
+		[]string{"resource"},
+	)
+	etcdLeaseObjectCounts = compbasemetrics.NewHistogramVec(
+		&compbasemetrics.HistogramOpts{
+			Name:           "etcd_lease_object_counts",
+			Help:           "Number of objects attached to a single etcd lease.",
+			Buckets:        []float64{10, 50, 100, 500, 1000, 2500, 5000},
+			StabilityLevel: compbasemetrics.ALPHA,
+		},
+		[]string{},
 	)
 )
 
@@ -68,9 +86,9 @@ func Register() {
 	registerMetrics.Do(func() {
 		legacyregistry.MustRegister(etcdRequestLatency)
 		legacyregistry.MustRegister(objectCounts)
-
-		// TODO(danielqsj): Remove the following metrics, they are deprecated
-		legacyregistry.MustRegister(deprecatedEtcdRequestLatenciesSummary)
+		legacyregistry.MustRegister(dbTotalSize)
+		legacyregistry.MustRegister(etcdBookmarkCounts)
+		legacyregistry.MustRegister(etcdLeaseObjectCounts)
 	})
 }
 
@@ -82,22 +100,31 @@ func UpdateObjectCount(resourcePrefix string, count int64) {
 // RecordEtcdRequestLatency sets the etcd_request_duration_seconds metrics.
 func RecordEtcdRequestLatency(verb, resource string, startTime time.Time) {
 	etcdRequestLatency.WithLabelValues(verb, resource).Observe(sinceInSeconds(startTime))
-	deprecatedEtcdRequestLatenciesSummary.WithLabelValues(verb, resource).Observe(sinceInMicroseconds(startTime))
+}
+
+// RecordEtcdBookmark updates the etcd_bookmark_counts metric.
+func RecordEtcdBookmark(resource string) {
+	etcdBookmarkCounts.WithLabelValues(resource).Inc()
 }
 
 // Reset resets the etcd_request_duration_seconds metric.
 func Reset() {
 	etcdRequestLatency.Reset()
-
-	deprecatedEtcdRequestLatenciesSummary.Reset()
-}
-
-// sinceInMicroseconds gets the time since the specified start in microseconds.
-func sinceInMicroseconds(start time.Time) float64 {
-	return float64(time.Since(start).Nanoseconds() / time.Microsecond.Nanoseconds())
 }
 
 // sinceInSeconds gets the time since the specified start in seconds.
 func sinceInSeconds(start time.Time) float64 {
 	return time.Since(start).Seconds()
+}
+
+// UpdateEtcdDbSize sets the etcd_db_total_size_in_bytes metric.
+func UpdateEtcdDbSize(ep string, size int64) {
+	dbTotalSize.WithLabelValues(ep).Set(float64(size))
+}
+
+// UpdateLeaseObjectCount sets the etcd_lease_object_counts metric.
+func UpdateLeaseObjectCount(count int64) {
+	// Currently we only store one previous lease, since all the events have the same ttl.
+	// See pkg/storage/etcd3/lease_manager.go
+	etcdLeaseObjectCounts.WithLabelValues().Observe(float64(count))
 }

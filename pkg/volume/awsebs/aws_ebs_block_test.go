@@ -52,7 +52,7 @@ func TestGetVolumeSpecFromGlobalMapPath(t *testing.T) {
 	expectedGlobalPath := filepath.Join(tmpVDir, testGlobalPath)
 
 	plugMgr := volume.VolumePluginMgr{}
-	plugMgr.InitPlugins(ProbeVolumePlugins(), nil /* prober */, volumetest.NewFakeVolumeHost(tmpVDir, nil, nil))
+	plugMgr.InitPlugins(ProbeVolumePlugins(), nil /* prober */, volumetest.NewFakeVolumeHost(t, tmpVDir, nil, nil))
 	plug, err := plugMgr.FindMapperPluginByName(awsElasticBlockStorePluginName)
 	if err != nil {
 		os.RemoveAll(tmpVDir)
@@ -78,8 +78,8 @@ func TestGetVolumeSpecFromGlobalMapPath(t *testing.T) {
 	}
 	block := v1.PersistentVolumeBlock
 	specMode := spec.PersistentVolume.Spec.VolumeMode
-	if &specMode == nil {
-		t.Errorf("Invalid volumeMode from GlobalMapPath spec: %v - %v", &specMode, block)
+	if specMode == nil {
+		t.Errorf("Invalid volumeMode from GlobalMapPath spec: %v - %v", specMode, block)
 	}
 	if *specMode != block {
 		t.Errorf("Invalid volumeMode from GlobalMapPath spec: %v - %v", *specMode, block)
@@ -120,7 +120,7 @@ func TestGetPodAndPluginMapPaths(t *testing.T) {
 
 	spec := getTestVolume(false, true /*isBlock*/)
 	plugMgr := volume.VolumePluginMgr{}
-	plugMgr.InitPlugins(ProbeVolumePlugins(), nil /* prober */, volumetest.NewFakeVolumeHost(tmpVDir, nil, nil))
+	plugMgr.InitPlugins(ProbeVolumePlugins(), nil /* prober */, volumetest.NewFakeVolumeHost(t, tmpVDir, nil, nil))
 	plug, err := plugMgr.FindMapperPluginByName(awsElasticBlockStorePluginName)
 	if err != nil {
 		os.RemoveAll(tmpVDir)

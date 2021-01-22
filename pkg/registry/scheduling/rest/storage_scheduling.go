@@ -17,12 +17,12 @@ limitations under the License.
 package rest
 
 import (
+	"context"
 	"fmt"
 	"time"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
-	schedulingv1beta1 "k8s.io/api/scheduling/v1beta1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -31,7 +31,7 @@ import (
 	"k8s.io/apiserver/pkg/registry/rest"
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	serverstorage "k8s.io/apiserver/pkg/server/storage"
-	schedulingclient "k8s.io/client-go/kubernetes/typed/scheduling/v1beta1"
+	schedulingclient "k8s.io/client-go/kubernetes/typed/scheduling/v1"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	"k8s.io/kubernetes/pkg/apis/scheduling"
 	schedulingapiv1 "k8s.io/kubernetes/pkg/apis/scheduling/v1"
@@ -123,21 +123,21 @@ func AddSystemPriorityClasses() genericapiserver.PostStartHookFunc {
 				return false, nil
 			}
 
-			for _, pc := range scheduling.SystemPriorityClasses() {
-				_, err := schedClientSet.PriorityClasses().Get(pc.Name, metav1.GetOptions{})
+			for _, pc := range schedulingapiv1.SystemPriorityClasses() {
+				_, err := schedClientSet.PriorityClasses().Get(context.TODO(), pc.Name, metav1.GetOptions{})
 				if err != nil {
 					if apierrors.IsNotFound(err) {
-						// TODO: Remove this explicit conversion after scheduling api move to v1
-						v1beta1PriorityClass := &schedulingv1beta1.PriorityClass{}
-						if err := schedulingapiv1beta1.Convert_scheduling_PriorityClass_To_v1beta1_PriorityClass(pc, v1beta1PriorityClass, nil); err != nil {
-							return false, err
-						}
-						_, err := schedClientSet.PriorityClasses().Create(v1beta1PriorityClass)
-						if err != nil && !apierrors.IsAlreadyExists(err) {
-							return false, err
-						} else {
+						_, err := schedClientSet.PriorityClasses().Create(context.TODO(), pc, metav1.CreateOptions{})
+						if err == nil || apierrors.IsAlreadyExists(err) {
 							klog.Infof("created PriorityClass %s with value %v", pc.Name, pc.Value)
+							continue
 						}
+						// ServiceUnavailble error is returned when the API server is blocked by storage version updates
+						if apierrors.IsServiceUnavailable(err) {
+							klog.Infof("going to retry, unable to create PriorityClass %s: %v", pc.Name, err)
+							return false, nil
+						}
+						return false, err
 					} else {
 						// Unable to get the priority class for reasons other than "not found".
 						klog.Warningf("unable to get PriorityClass %v: %v. Retrying...", pc.Name, err)

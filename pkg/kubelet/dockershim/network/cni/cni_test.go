@@ -1,4 +1,4 @@
-// +build linux
+// +build linux,!dockerless
 
 /*
 Copyright 2014 The Kubernetes Authors.
@@ -176,9 +176,9 @@ func TestCNIPlugin(t *testing.T) {
 	fakeCmds := []fakeexec.FakeCommandAction{
 		func(cmd string, args ...string) exec.Cmd {
 			return fakeexec.InitFakeCmd(&fakeexec.FakeCmd{
-				CombinedOutputScript: []fakeexec.FakeCombinedOutputAction{
-					func() ([]byte, error) {
-						return []byte(podIPOutput), nil
+				CombinedOutputScript: []fakeexec.FakeAction{
+					func() ([]byte, []byte, error) {
+						return []byte(podIPOutput), nil, nil
 					},
 				},
 			}, cmd, args...)
@@ -247,7 +247,6 @@ func TestCNIPlugin(t *testing.T) {
 	ports := map[string][]*hostport.PortMapping{
 		containerID.ID: {
 			{
-				Name:          "name",
 				HostPort:      8008,
 				ContainerPort: 80,
 				Protocol:      "UDP",

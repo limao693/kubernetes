@@ -53,6 +53,8 @@ func (strategy) NamespaceScoped() bool {
 }
 
 func (strategy) PrepareForCreate(ctx context.Context, obj runtime.Object) {
+	secret := obj.(*api.Secret)
+	dropDisabledFields(secret, nil)
 }
 
 func (strategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
@@ -67,10 +69,16 @@ func (strategy) AllowCreateOnUpdate() bool {
 }
 
 func (strategy) PrepareForUpdate(ctx context.Context, obj, old runtime.Object) {
+	newSecret := obj.(*api.Secret)
+	oldSecret := old.(*api.Secret)
+	dropDisabledFields(newSecret, oldSecret)
 }
 
 func (strategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
 	return validation.ValidateSecretUpdate(obj.(*api.Secret), old.(*api.Secret))
+}
+
+func dropDisabledFields(secret *api.Secret, oldSecret *api.Secret) {
 }
 
 func (strategy) AllowUnconditionalUpdate() bool {

@@ -30,6 +30,7 @@ type Provider interface {
 	config.EndpointsHandler
 	config.EndpointSliceHandler
 	config.ServiceHandler
+	config.NodeHandler
 
 	// Sync immediately synchronizes the Provider's current state to proxy rules.
 	Sync()
@@ -48,7 +49,14 @@ type ServicePortName struct {
 }
 
 func (spn ServicePortName) String() string {
-	return fmt.Sprintf("%s:%s", spn.NamespacedName.String(), spn.Port)
+	return fmt.Sprintf("%s%s", spn.NamespacedName.String(), fmtPortName(spn.Port))
+}
+
+func fmtPortName(in string) string {
+	if in == "" {
+		return ""
+	}
+	return fmt.Sprintf(":%s", in)
 }
 
 // ServicePort is an interface which abstracts information about a service.
@@ -77,6 +85,8 @@ type ServicePort interface {
 	NodePort() int
 	// GetOnlyNodeLocalEndpoints returns if a service has only node local endpoints
 	OnlyNodeLocalEndpoints() bool
+	// TopologyKeys returns service TopologyKeys as a string array.
+	TopologyKeys() []string
 }
 
 // Endpoint in an interface which abstracts information about an endpoint.
@@ -87,6 +97,22 @@ type Endpoint interface {
 	String() string
 	// GetIsLocal returns true if the endpoint is running in same host as kube-proxy, otherwise returns false.
 	GetIsLocal() bool
+	// IsReady returns true if an endpoint is ready and not terminating.
+	// This is only set when watching EndpointSlices. If using Endpoints, this is always
+	// true since only ready endpoints are read from Endpoints.
+	IsReady() bool
+	// IsServing returns true if an endpoint is ready. It does not account
+	// for terminating state.
+	// This is only set when watching EndpointSlices. If using Endpoints, this is always
+	// true since only ready endpoints are read from Endpoints.
+	IsServing() bool
+	// IsTerminating retruns true if an endpoint is terminating. For pods,
+	// that is any pod with a deletion timestamp.
+	// This is only set when watching EndpointSlices. If using Endpoints, this is always
+	// false since terminating endpoints are always excluded from Endpoints.
+	IsTerminating() bool
+	// GetTopology returns the topology information of the endpoint.
+	GetTopology() map[string]string
 	// IP returns IP part of the endpoint.
 	IP() string
 	// Port returns the Port part of the endpoint.

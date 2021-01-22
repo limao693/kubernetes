@@ -17,8 +17,11 @@ limitations under the License.
 package metrics
 
 import (
+	"context"
 	"github.com/blang/semver"
 	"github.com/prometheus/client_golang/prometheus"
+
+	"k8s.io/component-base/version"
 )
 
 // Gauge is our internal representation for our wrapping struct around prometheus
@@ -41,7 +44,7 @@ func NewGauge(opts *GaugeOpts) *Gauge {
 		lazyMetric: lazyMetric{},
 	}
 	kc.setPrometheusGauge(noop)
-	kc.lazyInit(kc)
+	kc.lazyInit(kc, BuildFQName(opts.Namespace, opts.Subsystem, opts.Name))
 	return kc
 }
 
@@ -71,6 +74,11 @@ func (g *Gauge) initializeDeprecatedMetric() {
 	g.initializeMetric()
 }
 
+// WithContext allows the normal Gauge metric to pass in context. The context is no-op now.
+func (g *Gauge) WithContext(ctx context.Context) GaugeMetric {
+	return g.GaugeMetric
+}
+
 // GaugeVec is the internal representation of our wrapping struct around prometheus
 // gaugeVecs. kubeGaugeVec implements both kubeCollector and KubeGaugeVec.
 type GaugeVec struct {
@@ -92,7 +100,7 @@ func NewGaugeVec(opts *GaugeOpts, labels []string) *GaugeVec {
 		originalLabels: labels,
 		lazyMetric:     lazyMetric{},
 	}
-	cv.lazyInit(cv)
+	cv.lazyInit(cv, BuildFQName(opts.Namespace, opts.Subsystem, opts.Name))
 	return cv
 }
 
@@ -157,4 +165,59 @@ func (v *GaugeVec) Delete(labels map[string]string) bool {
 		return false // since we haven't created the metric, we haven't deleted a metric with the passed in values
 	}
 	return v.GaugeVec.Delete(labels)
+}
+
+// Reset deletes all metrics in this vector.
+func (v *GaugeVec) Reset() {
+	if !v.IsCreated() {
+		return
+	}
+
+	v.GaugeVec.Reset()
+}
+
+func newGaugeFunc(opts GaugeOpts, function func() float64, v semver.Version) GaugeFunc {
+	g := NewGauge(&opts)
+
+	if !g.Create(&v) {
+		return nil
+	}
+
+	return prometheus.NewGaugeFunc(g.GaugeOpts.toPromGaugeOpts(), function)
+}
+
+// NewGaugeFunc creates a new GaugeFunc based on the provided GaugeOpts. The
+// value reported is determined by calling the given function from within the
+// Write method. Take into account that metric collection may happen
+// concurrently. If that results in concurrent calls to Write, like in the case
+// where a GaugeFunc is directly registered with Prometheus, the provided
+// function must be concurrency-safe.
+func NewGaugeFunc(opts GaugeOpts, function func() float64) GaugeFunc {
+	v := parseVersion(version.Get())
+
+	return newGaugeFunc(opts, function, v)
+}
+
+// WithContext returns wrapped GaugeVec with context
+func (v *GaugeVec) WithContext(ctx context.Context) *GaugeVecWithContext {
+	return &GaugeVecWithContext{
+		ctx:      ctx,
+		GaugeVec: *v,
+	}
+}
+
+// GaugeVecWithContext is the wrapper of GaugeVec with context.
+type GaugeVecWithContext struct {
+	GaugeVec
+	ctx context.Context
+}
+
+// WithLabelValues is the wrapper of GaugeVec.WithLabelValues.
+func (vc *GaugeVecWithContext) WithLabelValues(lvs ...string) GaugeMetric {
+	return vc.GaugeVec.WithLabelValues(lvs...)
+}
+
+// With is the wrapper of GaugeVec.With.
+func (vc *GaugeVecWithContext) With(labels map[string]string) GaugeMetric {
+	return vc.GaugeVec.With(labels)
 }

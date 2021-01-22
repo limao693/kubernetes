@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package e2e_node
+package e2enode
 
 import (
 	"fmt"
@@ -113,10 +113,10 @@ var _ = framework.KubeDescribe("SystemNodeCriticalPod [Slow] [Serial] [Disruptiv
 				ginkgo.By("making sure that node no longer has DiskPressure")
 				gomega.Eventually(func() error {
 					if hasNodeCondition(f, v1.NodeDiskPressure) {
-						return fmt.Errorf("Conditions havent returned to normal, node still has DiskPressure")
+						return fmt.Errorf("Conditions haven't returned to normal, node still has DiskPressure")
 					}
 					return nil
-				}, pressureDissapearTimeout, evictionPollInterval).Should(gomega.BeNil())
+				}, pressureDisappearTimeout, evictionPollInterval).Should(gomega.BeNil())
 			})
 		})
 	})

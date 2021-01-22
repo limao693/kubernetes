@@ -19,6 +19,9 @@ limitations under the License.
 package network
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
@@ -27,13 +30,16 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/net"
+	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/transport"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
+	e2erc "k8s.io/kubernetes/test/e2e/framework/rc"
 	testutils "k8s.io/kubernetes/test/utils"
 	imageutils "k8s.io/kubernetes/test/utils/image"
 
@@ -50,7 +56,14 @@ const (
 
 	// We have seen one of these calls take just over 15 seconds, so putting this at 30.
 	proxyHTTPCallTimeout = 30 * time.Second
+	podRetryPeriod       = 1 * time.Second
+	podRetryTimeout      = 1 * time.Minute
 )
+
+type jsonResponse struct {
+	Method string
+	Body   string
+}
 
 var _ = SIGDescribe("Proxy", func() {
 	version := "v1"
@@ -62,30 +75,28 @@ var _ = SIGDescribe("Proxy", func() {
 		prefix := "/api/" + version
 
 		/*
-			Release : v1.9
-			Testname: Proxy, logs port endpoint
-			Description: Select any node in the cluster to invoke /proxy/nodes/<nodeip>:10250/logs endpoint. This endpoint MUST be reachable.
+			Test for Proxy, logs port endpoint
+			Select any node in the cluster to invoke /proxy/nodes/<nodeip>:10250/logs endpoint. This endpoint MUST be reachable.
 		*/
-		framework.ConformanceIt("should proxy logs on node with explicit kubelet port using proxy subresource ", func() { nodeProxyTest(f, prefix+"/nodes/", ":10250/proxy/logs/") })
+		ginkgo.It("should proxy logs on node with explicit kubelet port using proxy subresource ", func() { nodeProxyTest(f, prefix+"/nodes/", ":10250/proxy/logs/") })
 
 		/*
-			Release : v1.9
-			Testname: Proxy, logs endpoint
-			Description:  Select any node in the cluster to invoke /proxy/nodes/<nodeip>//logs endpoint. This endpoint MUST be reachable.
+			Test for Proxy, logs endpoint
+			Select any node in the cluster to invoke /proxy/nodes/<nodeip>//logs endpoint. This endpoint MUST be reachable.
 		*/
-		framework.ConformanceIt("should proxy logs on node using proxy subresource ", func() { nodeProxyTest(f, prefix+"/nodes/", "/proxy/logs/") })
+		ginkgo.It("should proxy logs on node using proxy subresource ", func() { nodeProxyTest(f, prefix+"/nodes/", "/proxy/logs/") })
 
 		// using the porter image to serve content, access the content
 		// (of multiple pods?) from multiple (endpoints/services?)
 		/*
-			Release : v1.9
+			Release: v1.9
 			Testname: Proxy, logs service endpoint
 			Description: Select any node in the cluster to invoke  /logs endpoint  using the /nodes/proxy subresource from the kubelet port. This endpoint MUST be reachable.
 		*/
 		framework.ConformanceIt("should proxy through a service and a pod ", func() {
 			start := time.Now()
 			labels := map[string]string{"proxy-service-target": "true"}
-			service, err := f.ClientSet.CoreV1().Services(f.Namespace.Name).Create(&v1.Service{
+			service, err := f.ClientSet.CoreV1().Services(f.Namespace.Name).Create(context.TODO(), &v1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					GenerateName: "proxy-service-",
 				},
@@ -114,7 +125,7 @@ var _ = SIGDescribe("Proxy", func() {
 						},
 					},
 				},
-			})
+			}, metav1.CreateOptions{})
 			framework.ExpectNoError(err)
 
 			// Make an RC with a single pod. The 'porter' image is
@@ -160,9 +171,9 @@ var _ = SIGDescribe("Proxy", func() {
 				Labels:      labels,
 				CreatedPods: &pods,
 			}
-			err = framework.RunRC(cfg)
+			err = e2erc.RunRC(cfg)
 			framework.ExpectNoError(err)
-			defer framework.DeleteRCAndWaitForGC(f.ClientSet, f.Namespace.Name, cfg.Name)
+			defer e2erc.DeleteRCAndWaitForGC(f.ClientSet, f.Namespace.Name, cfg.Name)
 
 			err = waitForEndpoint(f.ClientSet, f.Namespace.Name, service.Name)
 			framework.ExpectNoError(err)
@@ -225,7 +236,7 @@ var _ = SIGDescribe("Proxy", func() {
 						body, status, d, err := doProxy(f, path, i)
 
 						if err != nil {
-							if serr, ok := err.(*errors.StatusError); ok {
+							if serr, ok := err.(*apierrors.StatusError); ok {
 								recordError(fmt.Sprintf("%v (%v; %v): path %v gave status error: %+v",
 									i, status, d, path, serr.Status()))
 							} else {
@@ -248,7 +259,7 @@ var _ = SIGDescribe("Proxy", func() {
 			}
 
 			if len(errs) != 0 {
-				body, err := f.ClientSet.CoreV1().Pods(f.Namespace.Name).GetLogs(pods[0].Name, &v1.PodLogOptions{}).Do().Raw()
+				body, err := f.ClientSet.CoreV1().Pods(f.Namespace.Name).GetLogs(pods[0].Name, &v1.PodLogOptions{}).Do(context.TODO()).Raw()
 				if err != nil {
 					framework.Logf("Error getting logs for pod %s: %v", pods[0].Name, err)
 				} else {
@@ -258,8 +269,160 @@ var _ = SIGDescribe("Proxy", func() {
 				framework.Failf(strings.Join(errs, "\n"))
 			}
 		})
+
+		ginkgo.It("A set of valid responses are returned for both pod and service ProxyWithPath", func() {
+
+			ns := f.Namespace.Name
+			msg := "foo"
+
+			framework.Logf("Creating pod...")
+			_, err := f.ClientSet.CoreV1().Pods(ns).Create(context.TODO(), &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "agnhost",
+					Labels: map[string]string{
+						"test": "response"},
+				},
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{{
+						Image:   imageutils.GetE2EImage(imageutils.Agnhost),
+						Name:    "agnhost",
+						Command: []string{"/agnhost", "porter", "--json-response"},
+						Env: []v1.EnvVar{{
+							Name:  "SERVE_PORT_80",
+							Value: msg,
+						}},
+					}},
+					RestartPolicy: v1.RestartPolicyNever,
+				}}, metav1.CreateOptions{})
+			framework.ExpectNoError(err, "failed to create pod")
+
+			err = wait.PollImmediate(podRetryPeriod, podRetryTimeout, checkPodStatus(f, "test=response"))
+			framework.ExpectNoError(err, "Pod didn't start within time out period")
+
+			framework.Logf("Creating service...")
+			_, err = f.ClientSet.CoreV1().Services(ns).Create(context.TODO(), &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-service",
+					Namespace: ns,
+					Labels: map[string]string{
+						"test": "response",
+					},
+				},
+				Spec: v1.ServiceSpec{
+					Ports: []v1.ServicePort{{
+						Port:       80,
+						TargetPort: intstr.FromInt(80),
+						Protocol:   v1.ProtocolTCP,
+					}},
+					Selector: map[string]string{
+						"test": "response",
+					},
+				}}, metav1.CreateOptions{})
+			framework.ExpectNoError(err, "Failed to create the service")
+
+			transportCfg, err := f.ClientConfig().TransportConfig()
+			framework.ExpectNoError(err, "Error creating transportCfg")
+			restTransport, err := transport.New(transportCfg)
+			framework.ExpectNoError(err, "Error creating restTransport")
+
+			client := &http.Client{
+				CheckRedirect: func(req *http.Request, via []*http.Request) error {
+					return http.ErrUseLastResponse
+				},
+				Transport: restTransport,
+			}
+
+			// All methods for Pod ProxyWithPath return 200
+			// For all methods other than HEAD the response body returns 'foo' with the received http method
+			httpVerbs := []string{"DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"}
+			for _, httpVerb := range httpVerbs {
+
+				urlString := f.ClientConfig().Host + "/api/v1/namespaces/" + ns + "/pods/agnhost/proxy/some/path/with/" + httpVerb
+				framework.Logf("Starting http.Client for %s", urlString)
+				request, err := http.NewRequest(httpVerb, urlString, nil)
+				framework.ExpectNoError(err, "processing request")
+
+				resp, err := client.Do(request)
+				framework.ExpectNoError(err, "processing response")
+				defer resp.Body.Close()
+
+				buf := new(bytes.Buffer)
+				buf.ReadFrom(resp.Body)
+				response := buf.String()
+
+				switch httpVerb {
+				case "HEAD":
+					framework.Logf("http.Client request:%s | StatusCode:%d", httpVerb, resp.StatusCode)
+					framework.ExpectEqual(resp.StatusCode, 200, "The resp.StatusCode returned: %d", resp.StatusCode)
+				default:
+					var jr *jsonResponse
+					err = json.Unmarshal([]byte(response), &jr)
+					framework.ExpectNoError(err, "Failed to process jsonResponse: %v | err: %v ", buf.String(), err)
+
+					framework.Logf("http.Client request:%s | StatusCode:%d | Response: %s | Method: %s", httpVerb, resp.StatusCode, jr.Body, jr.Method)
+					framework.ExpectEqual(resp.StatusCode, 200, "The resp.StatusCode returned: %d", resp.StatusCode)
+
+					framework.ExpectEqual(msg, jr.Body, "The resp.Body returned: %v", jr.Body)
+					framework.ExpectEqual(httpVerb, jr.Method, "The resp.Body returned: %v", jr.Body)
+				}
+			}
+
+			// All methods for Service ProxyWithPath return 200
+			// For all methods other than HEAD the response body returns 'foo' with the received http method
+			for _, httpVerb := range httpVerbs {
+
+				urlString := f.ClientConfig().Host + "/api/v1/namespaces/" + ns + "/services/test-service/proxy/some/path/with/" + httpVerb
+				framework.Logf("Starting http.Client for %s", urlString)
+				request, err := http.NewRequest(httpVerb, urlString, nil)
+				framework.ExpectNoError(err, "processing request")
+
+				resp, err := client.Do(request)
+				framework.ExpectNoError(err, "processing response")
+				defer resp.Body.Close()
+
+				buf := new(bytes.Buffer)
+				buf.ReadFrom(resp.Body)
+				response := buf.String()
+
+				switch httpVerb {
+				case "HEAD":
+					framework.Logf("http.Client request:%s | StatusCode:%d", httpVerb, resp.StatusCode)
+					framework.ExpectEqual(resp.StatusCode, 200, "The resp.StatusCode returned: %d", resp.StatusCode)
+				default:
+					var jr *jsonResponse
+					err = json.Unmarshal([]byte(response), &jr)
+					framework.ExpectNoError(err, "Failed to process jsonResponse: %v | err: %v ", buf.String(), err)
+
+					framework.Logf("http.Client request:%s | StatusCode:%d | Response: %s | Method: %s", httpVerb, resp.StatusCode, jr.Body, jr.Method)
+					framework.ExpectEqual(resp.StatusCode, 200, "The resp.StatusCode returned: %d", resp.StatusCode)
+
+					framework.ExpectEqual(msg, jr.Body, "The resp.Body returned: %v", jr.Body)
+					framework.ExpectEqual(httpVerb, jr.Method, "The resp.Body returned: %v", jr.Body)
+				}
+			}
+		})
 	})
 })
+
+func checkPodStatus(f *framework.Framework, label string) func() (bool, error) {
+	return func() (bool, error) {
+		var err error
+
+		list, err := f.ClientSet.CoreV1().Pods(f.Namespace.Name).List(context.TODO(), metav1.ListOptions{
+			LabelSelector: label})
+
+		if err != nil {
+			return false, err
+		}
+
+		if list.Items[0].Status.Phase != "Running" {
+			framework.Logf("Pod Quantity: %d Status: %s", len(list.Items), list.Items[0].Status.Phase)
+			return false, err
+		}
+		framework.Logf("Pod Status: %v", list.Items[0].Status.Phase)
+		return true, nil
+	}
+}
 
 func doProxy(f *framework.Framework, path string, i int) (body []byte, statusCode int, d time.Duration, err error) {
 	// About all of the proxy accesses in this file:
@@ -269,7 +432,7 @@ func doProxy(f *framework.Framework, path string, i int) (body []byte, statusCod
 	//   chance of the things we are talking to being confused for an error
 	//   that apiserver would have emitted.
 	start := time.Now()
-	body, err = f.ClientSet.CoreV1().RESTClient().Get().AbsPath(path).Do().StatusCode(&statusCode).Raw()
+	body, err = f.ClientSet.CoreV1().RESTClient().Get().AbsPath(path).Do(context.TODO()).StatusCode(&statusCode).Raw()
 	d = time.Since(start)
 	if len(body) > 0 {
 		framework.Logf("(%v) %v: %s (%v; %v)", i, path, truncate(body, maxDisplayBodyLen), statusCode, d)
@@ -320,8 +483,8 @@ func waitForEndpoint(c clientset.Interface, ns, name string) error {
 	// registerTimeout is how long to wait for an endpoint to be registered.
 	registerTimeout := time.Minute
 	for t := time.Now(); time.Since(t) < registerTimeout; time.Sleep(framework.Poll) {
-		endpoint, err := c.CoreV1().Endpoints(ns).Get(name, metav1.GetOptions{})
-		if errors.IsNotFound(err) {
+		endpoint, err := c.CoreV1().Endpoints(ns).Get(context.TODO(), name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
 			framework.Logf("Endpoint %s/%s is not ready yet", ns, name)
 			continue
 		}

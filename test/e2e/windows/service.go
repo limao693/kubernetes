@@ -24,6 +24,7 @@ import (
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2eservice "k8s.io/kubernetes/test/e2e/framework/service"
+	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 
 	"github.com/onsi/ginkgo"
 )
@@ -35,7 +36,7 @@ var _ = SIGDescribe("Services", func() {
 
 	ginkgo.BeforeEach(func() {
 		//Only for Windows containers
-		framework.SkipUnlessNodeOSDistroIs("windows")
+		e2eskipper.SkipUnlessNodeOSDistroIs("windows")
 		cs = f.ClientSet
 	})
 	ginkgo.It("should be able to create a functioning NodePort service for Windows", func() {
@@ -55,15 +56,26 @@ var _ = SIGDescribe("Services", func() {
 		nodePort := int(svc.Spec.Ports[0].NodePort)
 
 		ginkgo.By("creating Pod to be part of service " + serviceName)
-		_, err = jig.Run(nil)
+		// tweak the Jig to use windows...
+		windowsNodeSelectorTweak := func(rc *v1.ReplicationController) {
+			rc.Spec.Template.Spec.NodeSelector = map[string]string{
+				"kubernetes.io/os": "windows",
+			}
+		}
+		_, err = jig.Run(windowsNodeSelectorTweak)
 		framework.ExpectNoError(err)
 
 		//using hybrid_network methods
 		ginkgo.By("creating Windows testing Pod")
-		windowsPod := createTestPod(f, windowsBusyBoximage, windowsOS)
+		testPod := createTestPod(f, windowsBusyBoximage, windowsOS)
+		testPod = f.PodClient().CreateSync(testPod)
+
+		ginkgo.By("verifying that pod has the correct nodeSelector")
+		// Admission controllers may sometimes do the wrong thing
+		framework.ExpectEqual(testPod.Spec.NodeSelector["kubernetes.io/os"], "windows")
 
 		ginkgo.By(fmt.Sprintf("checking connectivity Pod to curl http://%s:%d", nodeIP, nodePort))
-		assertConsistentConnectivity(f, windowsPod.ObjectMeta.Name, windowsOS, windowsCheck(fmt.Sprintf("http://%s:%d", nodeIP, nodePort)))
+		assertConsistentConnectivity(f, testPod.ObjectMeta.Name, windowsOS, windowsCheck(fmt.Sprintf("http://%s:%d", nodeIP, nodePort)))
 
 	})
 

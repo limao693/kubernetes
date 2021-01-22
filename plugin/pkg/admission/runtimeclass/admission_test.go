@@ -23,15 +23,19 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/api/node/v1beta1"
+	nodev1 "k8s.io/api/node/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apiserver/pkg/admission"
 	"k8s.io/apiserver/pkg/authentication/user"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
-	featuregatetesting "k8s.io/component-base/featuregate/testing"
+	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/component-base/featuregate"
 	"k8s.io/kubernetes/pkg/apis/core"
+	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/kubernetes/pkg/features"
 
 	"github.com/stretchr/testify/assert"
@@ -82,17 +86,17 @@ func getGuaranteedRequirements() core.ResourceRequirements {
 func TestSetOverhead(t *testing.T) {
 	tests := []struct {
 		name         string
-		runtimeClass *v1beta1.RuntimeClass
+		runtimeClass *nodev1.RuntimeClass
 		pod          *core.Pod
 		expectError  bool
 		expectedPod  *core.Pod
 	}{
 		{
 			name: "overhead, no container requirements",
-			runtimeClass: &v1beta1.RuntimeClass{
+			runtimeClass: &nodev1.RuntimeClass{
 				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
 				Handler:    "bar",
-				Overhead: &v1beta1.Overhead{
+				Overhead: &nodev1.Overhead{
 					PodFixed: corev1.ResourceList{
 						corev1.ResourceName(corev1.ResourceCPU):    resource.MustParse("100m"),
 						corev1.ResourceName(corev1.ResourceMemory): resource.MustParse("1"),
@@ -105,10 +109,10 @@ func TestSetOverhead(t *testing.T) {
 		},
 		{
 			name: "overhead, guaranteed pod",
-			runtimeClass: &v1beta1.RuntimeClass{
+			runtimeClass: &nodev1.RuntimeClass{
 				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
 				Handler:    "bar",
-				Overhead: &v1beta1.Overhead{
+				Overhead: &nodev1.Overhead{
 					PodFixed: corev1.ResourceList{
 						corev1.ResourceName(corev1.ResourceCPU):    resource.MustParse("100m"),
 						corev1.ResourceName(corev1.ResourceMemory): resource.MustParse("1"),
@@ -121,10 +125,10 @@ func TestSetOverhead(t *testing.T) {
 		},
 		{
 			name: "overhead, pod with differing overhead already set",
-			runtimeClass: &v1beta1.RuntimeClass{
+			runtimeClass: &nodev1.RuntimeClass{
 				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
 				Handler:    "bar",
-				Overhead: &v1beta1.Overhead{
+				Overhead: &nodev1.Overhead{
 					PodFixed: corev1.ResourceList{
 						corev1.ResourceName(corev1.ResourceCPU):    resource.MustParse("10"),
 						corev1.ResourceName(corev1.ResourceMemory): resource.MustParse("10G"),
@@ -137,10 +141,10 @@ func TestSetOverhead(t *testing.T) {
 		},
 		{
 			name: "overhead, pod with same overhead already set",
-			runtimeClass: &v1beta1.RuntimeClass{
+			runtimeClass: &nodev1.RuntimeClass{
 				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
 				Handler:    "bar",
-				Overhead: &v1beta1.Overhead{
+				Overhead: &nodev1.Overhead{
 					PodFixed: corev1.ResourceList{
 						corev1.ResourceName(corev1.ResourceCPU):    resource.MustParse("100m"),
 						corev1.ResourceName(corev1.ResourceMemory): resource.MustParse("1"),
@@ -171,14 +175,14 @@ func TestSetOverhead(t *testing.T) {
 func TestSetScheduling(t *testing.T) {
 	tests := []struct {
 		name         string
-		runtimeClass *v1beta1.RuntimeClass
+		runtimeClass *nodev1.RuntimeClass
 		pod          *core.Pod
 		expectError  bool
 		expectedPod  *core.Pod
 	}{
 		{
 			name: "scheduling, nil scheduling",
-			runtimeClass: &v1beta1.RuntimeClass{
+			runtimeClass: &nodev1.RuntimeClass{
 				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
 				Handler:    "bar",
 				Scheduling: nil,
@@ -189,10 +193,10 @@ func TestSetScheduling(t *testing.T) {
 		},
 		{
 			name: "scheduling, conflict node selector",
-			runtimeClass: &v1beta1.RuntimeClass{
+			runtimeClass: &nodev1.RuntimeClass{
 				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
 				Handler:    "bar",
-				Scheduling: &v1beta1.Scheduling{
+				Scheduling: &nodev1.Scheduling{
 					NodeSelector: map[string]string{
 						"foo": "conflict",
 					},
@@ -203,10 +207,10 @@ func TestSetScheduling(t *testing.T) {
 		},
 		{
 			name: "scheduling, nil node selector",
-			runtimeClass: &v1beta1.RuntimeClass{
+			runtimeClass: &nodev1.RuntimeClass{
 				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
 				Handler:    "bar",
-				Scheduling: &v1beta1.Scheduling{
+				Scheduling: &nodev1.Scheduling{
 					NodeSelector: map[string]string{
 						"foo": "bar",
 					},
@@ -218,10 +222,10 @@ func TestSetScheduling(t *testing.T) {
 		},
 		{
 			name: "scheduling, node selector with the same key value",
-			runtimeClass: &v1beta1.RuntimeClass{
+			runtimeClass: &nodev1.RuntimeClass{
 				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
 				Handler:    "bar",
-				Scheduling: &v1beta1.Scheduling{
+				Scheduling: &nodev1.Scheduling{
 					NodeSelector: map[string]string{
 						"foo": "bar",
 					},
@@ -233,10 +237,10 @@ func TestSetScheduling(t *testing.T) {
 		},
 		{
 			name: "scheduling, node selector with different key value",
-			runtimeClass: &v1beta1.RuntimeClass{
+			runtimeClass: &nodev1.RuntimeClass{
 				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
 				Handler:    "bar",
-				Scheduling: &v1beta1.Scheduling{
+				Scheduling: &nodev1.Scheduling{
 					NodeSelector: map[string]string{
 						"foo":  "bar",
 						"fizz": "buzz",
@@ -249,10 +253,10 @@ func TestSetScheduling(t *testing.T) {
 		},
 		{
 			name: "scheduling, multiple tolerations",
-			runtimeClass: &v1beta1.RuntimeClass{
+			runtimeClass: &nodev1.RuntimeClass{
 				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
 				Handler:    "bar",
-				Scheduling: &v1beta1.Scheduling{
+				Scheduling: &nodev1.Scheduling{
 					Tolerations: []v1.Toleration{
 						{
 							Key:      "foo",
@@ -318,18 +322,154 @@ func NewObjectInterfacesForTest() admission.ObjectInterfaces {
 	return admission.NewObjectInterfacesFromScheme(scheme)
 }
 
-func TestValidate(t *testing.T) {
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PodOverhead, true)()
+func newRuntimeClassForTest(
+	featureInspection bool,
+	addLister bool,
+	listerObject *nodev1.RuntimeClass,
+	addClient bool,
+	clientObject *nodev1.RuntimeClass) *RuntimeClass {
+	runtimeClass := NewRuntimeClass()
+
+	if featureInspection {
+		relevantFeatures := map[featuregate.Feature]featuregate.FeatureSpec{
+			features.PodOverhead: {Default: false},
+		}
+		fg := featuregate.NewFeatureGate()
+		fg.Add(relevantFeatures)
+		runtimeClass.InspectFeatureGates(fg)
+	}
+
+	if addLister {
+		informerFactory := informers.NewSharedInformerFactory(nil, controller.NoResyncPeriodFunc())
+		runtimeClass.SetExternalKubeInformerFactory(informerFactory)
+		if listerObject != nil {
+			informerFactory.Node().V1().RuntimeClasses().Informer().GetStore().Add(listerObject)
+		}
+	}
+
+	if addClient {
+		var client kubernetes.Interface
+		if clientObject != nil {
+			client = fake.NewSimpleClientset(clientObject)
+		} else {
+			client = fake.NewSimpleClientset()
+		}
+		runtimeClass.SetExternalKubeClientSet(client)
+	}
+
+	return runtimeClass
+}
+
+func TestValidateInitialization(t *testing.T) {
+	tests := []struct {
+		name         string
+		expectError  bool
+		runtimeClass *RuntimeClass
+	}{
+		{
+			name:         "runtimeClass enabled, success",
+			expectError:  false,
+			runtimeClass: newRuntimeClassForTest(true, true, nil, true, nil),
+		},
+		{
+			name:         "runtimeClass enabled, no feature inspection",
+			expectError:  true,
+			runtimeClass: newRuntimeClassForTest(false, true, nil, true, nil),
+		},
+		{
+			name:         "runtimeClass enabled, no lister",
+			expectError:  true,
+			runtimeClass: newRuntimeClassForTest(true, false, nil, true, nil),
+		},
+		{
+			name:         "runtimeClass enabled, no client",
+			expectError:  true,
+			runtimeClass: newRuntimeClassForTest(true, true, nil, false, nil),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.runtimeClass.ValidateInitialization()
+			if tc.expectError {
+				assert.NotEmpty(t, err)
+			} else {
+				assert.Empty(t, err)
+			}
+		})
+	}
+}
+
+func TestAdmit(t *testing.T) {
+	runtimeClassName := "runtimeClassName"
+
+	rc := &nodev1.RuntimeClass{
+		ObjectMeta: metav1.ObjectMeta{Name: runtimeClassName},
+	}
+
+	pod := api.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "podname"},
+		Spec: api.PodSpec{
+			RuntimeClassName: &runtimeClassName,
+		},
+	}
+
+	attributes := admission.NewAttributesRecord(&pod,
+		nil,
+		api.Kind("kind").WithVersion("version"),
+		"",
+		"",
+		api.Resource("pods").WithVersion("version"),
+		"",
+		admission.Create,
+		nil,
+		false,
+		nil)
 
 	tests := []struct {
 		name         string
-		runtimeClass *v1beta1.RuntimeClass
+		expectError  bool
+		runtimeClass *RuntimeClass
+	}{
+		{
+			name:         "runtimeClass found by lister",
+			expectError:  false,
+			runtimeClass: newRuntimeClassForTest(true, true, rc, true, nil),
+		},
+		{
+			name:         "runtimeClass found by client",
+			expectError:  false,
+			runtimeClass: newRuntimeClassForTest(true, true, nil, true, rc),
+		},
+		{
+			name:         "runtimeClass not found by lister nor client",
+			expectError:  true,
+			runtimeClass: newRuntimeClassForTest(true, true, nil, true, nil),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.runtimeClass.Admit(context.TODO(), attributes, nil)
+			if tc.expectError {
+				assert.NotEmpty(t, err)
+			} else {
+				assert.Empty(t, err)
+			}
+		})
+	}
+}
+
+func TestValidate(t *testing.T) {
+	tests := []struct {
+		name         string
+		runtimeClass *nodev1.RuntimeClass
 		pod          *core.Pod
 		expectError  bool
 	}{
 		{
 			name: "No Overhead in RunntimeClass, Overhead set in pod",
-			runtimeClass: &v1beta1.RuntimeClass{
+			runtimeClass: &nodev1.RuntimeClass{
 				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
 				Handler:    "bar",
 			},
@@ -338,10 +478,10 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name: "Non-matching Overheads",
-			runtimeClass: &v1beta1.RuntimeClass{
+			runtimeClass: &nodev1.RuntimeClass{
 				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
 				Handler:    "bar",
-				Overhead: &v1beta1.Overhead{
+				Overhead: &nodev1.Overhead{
 					PodFixed: corev1.ResourceList{
 						corev1.ResourceName(corev1.ResourceCPU):    resource.MustParse("10"),
 						corev1.ResourceName(corev1.ResourceMemory): resource.MustParse("10G"),
@@ -353,10 +493,10 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name: "Matching Overheads",
-			runtimeClass: &v1beta1.RuntimeClass{
+			runtimeClass: &nodev1.RuntimeClass{
 				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
 				Handler:    "bar",
-				Overhead: &v1beta1.Overhead{
+				Overhead: &nodev1.Overhead{
 					PodFixed: corev1.ResourceList{
 						corev1.ResourceName(corev1.ResourceCPU):    resource.MustParse("100m"),
 						corev1.ResourceName(corev1.ResourceMemory): resource.MustParse("1"),
@@ -368,6 +508,7 @@ func TestValidate(t *testing.T) {
 		},
 	}
 	rt := NewRuntimeClass()
+	rt.podOverheadEnabled = true
 	o := NewObjectInterfacesForTest()
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -387,16 +528,16 @@ func TestValidate(t *testing.T) {
 func TestValidateOverhead(t *testing.T) {
 	tests := []struct {
 		name         string
-		runtimeClass *v1beta1.RuntimeClass
+		runtimeClass *nodev1.RuntimeClass
 		pod          *core.Pod
 		expectError  bool
 	}{
 		{
 			name: "Overhead part of RuntimeClass, no Overhead defined in pod",
-			runtimeClass: &v1beta1.RuntimeClass{
+			runtimeClass: &nodev1.RuntimeClass{
 				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
 				Handler:    "bar",
-				Overhead: &v1beta1.Overhead{
+				Overhead: &nodev1.Overhead{
 					PodFixed: corev1.ResourceList{
 						corev1.ResourceName(corev1.ResourceCPU):    resource.MustParse("100m"),
 						corev1.ResourceName(corev1.ResourceMemory): resource.MustParse("1"),
@@ -408,7 +549,7 @@ func TestValidateOverhead(t *testing.T) {
 		},
 		{
 			name: "No Overhead in RunntimeClass, Overhead set in pod",
-			runtimeClass: &v1beta1.RuntimeClass{
+			runtimeClass: &nodev1.RuntimeClass{
 				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
 				Handler:    "bar",
 			},
@@ -423,10 +564,10 @@ func TestValidateOverhead(t *testing.T) {
 		},
 		{
 			name: "Non-matching Overheads",
-			runtimeClass: &v1beta1.RuntimeClass{
+			runtimeClass: &nodev1.RuntimeClass{
 				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
 				Handler:    "bar",
-				Overhead: &v1beta1.Overhead{
+				Overhead: &nodev1.Overhead{
 					PodFixed: corev1.ResourceList{
 						corev1.ResourceName(corev1.ResourceCPU):    resource.MustParse("10"),
 						corev1.ResourceName(corev1.ResourceMemory): resource.MustParse("10G"),
@@ -438,10 +579,10 @@ func TestValidateOverhead(t *testing.T) {
 		},
 		{
 			name: "Matching Overheads",
-			runtimeClass: &v1beta1.RuntimeClass{
+			runtimeClass: &nodev1.RuntimeClass{
 				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
 				Handler:    "bar",
-				Overhead: &v1beta1.Overhead{
+				Overhead: &nodev1.Overhead{
 					PodFixed: corev1.ResourceList{
 						corev1.ResourceName(corev1.ResourceCPU):    resource.MustParse("100m"),
 						corev1.ResourceName(corev1.ResourceMemory): resource.MustParse("1"),

@@ -17,6 +17,7 @@ limitations under the License.
 package kubelet
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -43,14 +44,11 @@ import (
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/wait"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
 	core "k8s.io/client-go/testing"
-	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/component-base/version"
-	"k8s.io/kubernetes/pkg/features"
 	kubeletapis "k8s.io/kubernetes/pkg/kubelet/apis"
 	cadvisortest "k8s.io/kubernetes/pkg/kubelet/cadvisor/testing"
 	"k8s.io/kubernetes/pkg/kubelet/cm"
@@ -58,7 +56,6 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/nodestatus"
 	"k8s.io/kubernetes/pkg/kubelet/util/sliceutils"
 	kubeletvolume "k8s.io/kubernetes/pkg/kubelet/volumemanager"
-	schedulerapi "k8s.io/kubernetes/pkg/scheduler/api"
 	taintutil "k8s.io/kubernetes/pkg/util/taints"
 	"k8s.io/kubernetes/pkg/volume/util"
 )
@@ -216,7 +213,7 @@ func TestUpdateNewNodeStatus(t *testing.T) {
 				NumCores:       2,
 				MemoryCapacity: 10e9, // 10G
 			}
-			kubelet.machineInfo = machineInfo
+			kubelet.setCachedMachineInfo(machineInfo)
 
 			expectedNode := &v1.Node{
 				ObjectMeta: metav1.ObjectMeta{Name: testKubeletHostname},
@@ -227,7 +224,7 @@ func TestUpdateNewNodeStatus(t *testing.T) {
 							Type:               v1.NodeMemoryPressure,
 							Status:             v1.ConditionFalse,
 							Reason:             "KubeletHasSufficientMemory",
-							Message:            fmt.Sprintf("kubelet has sufficient memory available"),
+							Message:            "kubelet has sufficient memory available",
 							LastHeartbeatTime:  metav1.Time{},
 							LastTransitionTime: metav1.Time{},
 						},
@@ -235,7 +232,7 @@ func TestUpdateNewNodeStatus(t *testing.T) {
 							Type:               v1.NodeDiskPressure,
 							Status:             v1.ConditionFalse,
 							Reason:             "KubeletHasNoDiskPressure",
-							Message:            fmt.Sprintf("kubelet has no disk pressure"),
+							Message:            "kubelet has no disk pressure",
 							LastHeartbeatTime:  metav1.Time{},
 							LastTransitionTime: metav1.Time{},
 						},
@@ -243,7 +240,7 @@ func TestUpdateNewNodeStatus(t *testing.T) {
 							Type:               v1.NodePIDPressure,
 							Status:             v1.ConditionFalse,
 							Reason:             "KubeletHasSufficientPID",
-							Message:            fmt.Sprintf("kubelet has sufficient PID available"),
+							Message:            "kubelet has sufficient PID available",
 							LastHeartbeatTime:  metav1.Time{},
 							LastTransitionTime: metav1.Time{},
 						},
@@ -251,7 +248,7 @@ func TestUpdateNewNodeStatus(t *testing.T) {
 							Type:               v1.NodeReady,
 							Status:             v1.ConditionTrue,
 							Reason:             "KubeletReady",
-							Message:            fmt.Sprintf("kubelet is posting ready status"),
+							Message:            "kubelet is posting ready status",
 							LastHeartbeatTime:  metav1.Time{},
 							LastTransitionTime: metav1.Time{},
 						},
@@ -394,7 +391,7 @@ func TestUpdateExistingNodeStatus(t *testing.T) {
 		NumCores:       2,
 		MemoryCapacity: 20e9,
 	}
-	kubelet.machineInfo = machineInfo
+	kubelet.setCachedMachineInfo(machineInfo)
 
 	expectedNode := &v1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: testKubeletHostname},
@@ -600,7 +597,7 @@ func TestUpdateNodeStatusWithRuntimeStateError(t *testing.T) {
 		NumCores:       2,
 		MemoryCapacity: 10e9,
 	}
-	kubelet.machineInfo = machineInfo
+	kubelet.setCachedMachineInfo(machineInfo)
 
 	expectedNode := &v1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: testKubeletHostname},
@@ -682,7 +679,7 @@ func TestUpdateNodeStatusWithRuntimeStateError(t *testing.T) {
 		require.True(t, actions[1].Matches("patch", "nodes"))
 		require.Equal(t, actions[1].GetSubresource(), "status")
 
-		updatedNode, err := kubeClient.CoreV1().Nodes().Get(testKubeletHostname, metav1.GetOptions{})
+		updatedNode, err := kubeClient.CoreV1().Nodes().Get(context.TODO(), testKubeletHostname, metav1.GetOptions{})
 		require.NoError(t, err, "can't apply node status patch")
 
 		for i, cond := range updatedNode.Status.Conditions {
@@ -787,8 +784,6 @@ func TestUpdateNodeStatusError(t *testing.T) {
 }
 
 func TestUpdateNodeStatusWithLease(t *testing.T) {
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.NodeLease, true)()
-
 	testKubelet := newTestKubelet(t, false /* controllerAttachDetachEnabled */)
 	defer testKubelet.Cleanup()
 	clock := testKubelet.fakeClock
@@ -822,7 +817,7 @@ func TestUpdateNodeStatusWithLease(t *testing.T) {
 		NumCores:       2,
 		MemoryCapacity: 20e9,
 	}
-	kubelet.machineInfo = machineInfo
+	kubelet.setCachedMachineInfo(machineInfo)
 
 	now := metav1.NewTime(clock.Now()).Rfc3339Copy()
 	expectedNode := &v1.Node{
@@ -967,7 +962,13 @@ func TestUpdateNodeStatusWithLease(t *testing.T) {
 	// Report node status even if it is still within the duration of nodeStatusReportFrequency.
 	clock.Step(10 * time.Second)
 	var newMemoryCapacity int64 = 40e9
-	kubelet.machineInfo.MemoryCapacity = uint64(newMemoryCapacity)
+	oldMachineInfo, err := kubelet.GetCachedMachineInfo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	newMachineInfo := oldMachineInfo.Clone()
+	newMachineInfo.MemoryCapacity = uint64(newMemoryCapacity)
+	kubelet.setCachedMachineInfo(newMachineInfo)
 	assert.NoError(t, kubelet.updateNodeStatus())
 
 	// 2 more action (There were 5 actions before).
@@ -1021,116 +1022,7 @@ func TestUpdateNodeStatusWithLease(t *testing.T) {
 	assert.IsType(t, core.GetActionImpl{}, actions[9])
 }
 
-func TestUpdateNodeStatusAndVolumesInUseWithoutNodeLease(t *testing.T) {
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.NodeLease, false)()
-
-	cases := []struct {
-		desc                  string
-		existingVolumes       []v1.UniqueVolumeName // volumes to initially populate volumeManager
-		existingNode          *v1.Node              // existing node object
-		expectedNode          *v1.Node              // new node object after patch
-		expectedReportedInUse []v1.UniqueVolumeName // expected volumes reported in use in volumeManager
-	}{
-		{
-			desc:         "no volumes and no update",
-			existingNode: &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: testKubeletHostname}},
-			expectedNode: &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: testKubeletHostname}},
-		},
-		{
-			desc:            "volumes inuse on node and volumeManager",
-			existingVolumes: []v1.UniqueVolumeName{"vol1"},
-			existingNode: &v1.Node{
-				ObjectMeta: metav1.ObjectMeta{Name: testKubeletHostname},
-				Status: v1.NodeStatus{
-					VolumesInUse: []v1.UniqueVolumeName{"vol1"},
-				},
-			},
-			expectedNode: &v1.Node{
-				ObjectMeta: metav1.ObjectMeta{Name: testKubeletHostname},
-				Status: v1.NodeStatus{
-					VolumesInUse: []v1.UniqueVolumeName{"vol1"},
-				},
-			},
-			expectedReportedInUse: []v1.UniqueVolumeName{"vol1"},
-		},
-		{
-			desc: "volumes inuse on node but not in volumeManager",
-			existingNode: &v1.Node{
-				ObjectMeta: metav1.ObjectMeta{Name: testKubeletHostname},
-				Status: v1.NodeStatus{
-					VolumesInUse: []v1.UniqueVolumeName{"vol1"},
-				},
-			},
-			expectedNode: &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: testKubeletHostname}},
-		},
-		{
-			desc:            "volumes inuse in volumeManager but not on node",
-			existingVolumes: []v1.UniqueVolumeName{"vol1"},
-			existingNode:    &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: testKubeletHostname}},
-			expectedNode: &v1.Node{
-				ObjectMeta: metav1.ObjectMeta{Name: testKubeletHostname},
-				Status: v1.NodeStatus{
-					VolumesInUse: []v1.UniqueVolumeName{"vol1"},
-				},
-			},
-			expectedReportedInUse: []v1.UniqueVolumeName{"vol1"},
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.desc, func(t *testing.T) {
-			// Setup
-			testKubelet := newTestKubelet(t, false /* controllerAttachDetachEnabled */)
-			defer testKubelet.Cleanup()
-
-			kubelet := testKubelet.kubelet
-			kubelet.kubeClient = nil // ensure only the heartbeat client is used
-			kubelet.containerManager = &localCM{ContainerManager: cm.NewStubContainerManager()}
-			kubelet.lastStatusReportTime = kubelet.clock.Now()
-			kubelet.nodeStatusReportFrequency = time.Hour
-			kubelet.machineInfo = &cadvisorapi.MachineInfo{}
-
-			// override test volumeManager
-			fakeVolumeManager := kubeletvolume.NewFakeVolumeManager(tc.existingVolumes)
-			kubelet.volumeManager = fakeVolumeManager
-
-			// Only test VolumesInUse setter
-			kubelet.setNodeStatusFuncs = []func(*v1.Node) error{
-				nodestatus.VolumesInUse(kubelet.volumeManager.ReconcilerStatesHasBeenSynced,
-					kubelet.volumeManager.GetVolumesInUse),
-			}
-
-			kubeClient := testKubelet.fakeKubeClient
-			kubeClient.ReactionChain = fake.NewSimpleClientset(&v1.NodeList{Items: []v1.Node{*tc.existingNode}}).ReactionChain
-
-			// Execute
-			assert.NoError(t, kubelet.updateNodeStatus())
-
-			// Validate
-			actions := kubeClient.Actions()
-			if tc.expectedNode != nil {
-				assert.Len(t, actions, 2)
-				assert.IsType(t, core.GetActionImpl{}, actions[0])
-				assert.IsType(t, core.PatchActionImpl{}, actions[1])
-				patchAction := actions[1].(core.PatchActionImpl)
-
-				updatedNode, err := applyNodeStatusPatch(tc.existingNode, patchAction.GetPatch())
-				require.NoError(t, err)
-				assert.True(t, apiequality.Semantic.DeepEqual(tc.expectedNode, updatedNode), "%s", diff.ObjectDiff(tc.expectedNode, updatedNode))
-			} else {
-				assert.Len(t, actions, 1)
-				assert.IsType(t, core.GetActionImpl{}, actions[0])
-			}
-
-			reportedInUse := fakeVolumeManager.GetVolumesReportedInUse()
-			assert.True(t, apiequality.Semantic.DeepEqual(tc.expectedReportedInUse, reportedInUse), "%s", diff.ObjectDiff(tc.expectedReportedInUse, reportedInUse))
-		})
-	}
-}
-
 func TestUpdateNodeStatusAndVolumesInUseWithNodeLease(t *testing.T) {
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.NodeLease, true)()
-
 	cases := []struct {
 		desc                  string
 		existingVolumes       []v1.UniqueVolumeName // volumes to initially populate volumeManager
@@ -1188,7 +1080,7 @@ func TestUpdateNodeStatusAndVolumesInUseWithNodeLease(t *testing.T) {
 			kubelet.containerManager = &localCM{ContainerManager: cm.NewStubContainerManager()}
 			kubelet.lastStatusReportTime = kubelet.clock.Now()
 			kubelet.nodeStatusReportFrequency = time.Hour
-			kubelet.machineInfo = &cadvisorapi.MachineInfo{}
+			kubelet.setCachedMachineInfo(&cadvisorapi.MachineInfo{})
 
 			// override test volumeManager
 			fakeVolumeManager := kubeletvolume.NewFakeVolumeManager(tc.existingVolumes)
@@ -1255,6 +1147,13 @@ func TestRegisterWithApiServer(t *testing.T) {
 		}, nil
 	})
 
+	kubeClient.AddReactor("patch", "nodes", func(action core.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() == "status" {
+			return true, nil, nil
+		}
+		return notImplemented(action)
+	})
+
 	addNotImplatedReaction(kubeClient)
 
 	machineInfo := &cadvisorapi.MachineInfo{
@@ -1264,7 +1163,7 @@ func TestRegisterWithApiServer(t *testing.T) {
 		NumCores:       2,
 		MemoryCapacity: 1024,
 	}
-	kubelet.machineInfo = machineInfo
+	kubelet.setCachedMachineInfo(machineInfo)
 
 	done := make(chan struct{})
 	go func() {
@@ -1475,7 +1374,7 @@ func TestUpdateNewNodeStatusTooLargeReservation(t *testing.T) {
 		NumCores:       2,
 		MemoryCapacity: 10e9, // 10G
 	}
-	kubelet.machineInfo = machineInfo
+	kubelet.setCachedMachineInfo(machineInfo)
 
 	expectedNode := &v1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: testKubeletHostname},
@@ -1524,12 +1423,15 @@ func TestUpdateDefaultLabels(t *testing.T) {
 			initialNode: &v1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						v1.LabelHostname:          "new-hostname",
-						v1.LabelZoneFailureDomain: "new-zone-failure-domain",
-						v1.LabelZoneRegion:        "new-zone-region",
-						v1.LabelInstanceType:      "new-instance-type",
-						kubeletapis.LabelOS:       "new-os",
-						kubeletapis.LabelArch:     "new-arch",
+						v1.LabelHostname:                "new-hostname",
+						v1.LabelTopologyZone:            "new-zone-failure-domain",
+						v1.LabelTopologyRegion:          "new-zone-region",
+						v1.LabelFailureDomainBetaZone:   "new-zone-failure-domain",
+						v1.LabelFailureDomainBetaRegion: "new-zone-region",
+						v1.LabelInstanceTypeStable:      "new-instance-type",
+						v1.LabelInstanceType:            "new-instance-type",
+						v1.LabelOSStable:                "new-os",
+						v1.LabelArchStable:              "new-arch",
 					},
 				},
 			},
@@ -1540,12 +1442,15 @@ func TestUpdateDefaultLabels(t *testing.T) {
 			},
 			needsUpdate: true,
 			finalLabels: map[string]string{
-				v1.LabelHostname:          "new-hostname",
-				v1.LabelZoneFailureDomain: "new-zone-failure-domain",
-				v1.LabelZoneRegion:        "new-zone-region",
-				v1.LabelInstanceType:      "new-instance-type",
-				kubeletapis.LabelOS:       "new-os",
-				kubeletapis.LabelArch:     "new-arch",
+				v1.LabelHostname:                "new-hostname",
+				v1.LabelTopologyZone:            "new-zone-failure-domain",
+				v1.LabelTopologyRegion:          "new-zone-region",
+				v1.LabelFailureDomainBetaZone:   "new-zone-failure-domain",
+				v1.LabelFailureDomainBetaRegion: "new-zone-region",
+				v1.LabelInstanceTypeStable:      "new-instance-type",
+				v1.LabelInstanceType:            "new-instance-type",
+				v1.LabelOSStable:                "new-os",
+				v1.LabelArchStable:              "new-arch",
 			},
 		},
 		{
@@ -1553,35 +1458,44 @@ func TestUpdateDefaultLabels(t *testing.T) {
 			initialNode: &v1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						v1.LabelHostname:          "new-hostname",
-						v1.LabelZoneFailureDomain: "new-zone-failure-domain",
-						v1.LabelZoneRegion:        "new-zone-region",
-						v1.LabelInstanceType:      "new-instance-type",
-						kubeletapis.LabelOS:       "new-os",
-						kubeletapis.LabelArch:     "new-arch",
+						v1.LabelHostname:                "new-hostname",
+						v1.LabelTopologyZone:            "new-zone-failure-domain",
+						v1.LabelTopologyRegion:          "new-zone-region",
+						v1.LabelFailureDomainBetaZone:   "new-zone-failure-domain",
+						v1.LabelFailureDomainBetaRegion: "new-zone-region",
+						v1.LabelInstanceTypeStable:      "new-instance-type",
+						v1.LabelInstanceType:            "new-instance-type",
+						v1.LabelOSStable:                "new-os",
+						v1.LabelArchStable:              "new-arch",
 					},
 				},
 			},
 			existingNode: &v1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						v1.LabelHostname:          "old-hostname",
-						v1.LabelZoneFailureDomain: "old-zone-failure-domain",
-						v1.LabelZoneRegion:        "old-zone-region",
-						v1.LabelInstanceType:      "old-instance-type",
-						kubeletapis.LabelOS:       "old-os",
-						kubeletapis.LabelArch:     "old-arch",
+						v1.LabelHostname:                "old-hostname",
+						v1.LabelTopologyZone:            "old-zone-failure-domain",
+						v1.LabelTopologyRegion:          "old-zone-region",
+						v1.LabelFailureDomainBetaZone:   "old-zone-failure-domain",
+						v1.LabelFailureDomainBetaRegion: "old-zone-region",
+						v1.LabelInstanceTypeStable:      "old-instance-type",
+						v1.LabelInstanceType:            "old-instance-type",
+						v1.LabelOSStable:                "old-os",
+						v1.LabelArchStable:              "old-arch",
 					},
 				},
 			},
 			needsUpdate: true,
 			finalLabels: map[string]string{
-				v1.LabelHostname:          "new-hostname",
-				v1.LabelZoneFailureDomain: "new-zone-failure-domain",
-				v1.LabelZoneRegion:        "new-zone-region",
-				v1.LabelInstanceType:      "new-instance-type",
-				kubeletapis.LabelOS:       "new-os",
-				kubeletapis.LabelArch:     "new-arch",
+				v1.LabelHostname:                "new-hostname",
+				v1.LabelTopologyZone:            "new-zone-failure-domain",
+				v1.LabelTopologyRegion:          "new-zone-region",
+				v1.LabelFailureDomainBetaZone:   "new-zone-failure-domain",
+				v1.LabelFailureDomainBetaRegion: "new-zone-region",
+				v1.LabelInstanceTypeStable:      "new-instance-type",
+				v1.LabelInstanceType:            "new-instance-type",
+				v1.LabelOSStable:                "new-os",
+				v1.LabelArchStable:              "new-arch",
 			},
 		},
 		{
@@ -1589,37 +1503,46 @@ func TestUpdateDefaultLabels(t *testing.T) {
 			initialNode: &v1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						v1.LabelHostname:          "new-hostname",
-						v1.LabelZoneFailureDomain: "new-zone-failure-domain",
-						v1.LabelZoneRegion:        "new-zone-region",
-						v1.LabelInstanceType:      "new-instance-type",
-						kubeletapis.LabelOS:       "new-os",
-						kubeletapis.LabelArch:     "new-arch",
+						v1.LabelHostname:                "new-hostname",
+						v1.LabelTopologyZone:            "new-zone-failure-domain",
+						v1.LabelTopologyRegion:          "new-zone-region",
+						v1.LabelFailureDomainBetaZone:   "new-zone-failure-domain",
+						v1.LabelFailureDomainBetaRegion: "new-zone-region",
+						v1.LabelInstanceTypeStable:      "new-instance-type",
+						v1.LabelInstanceType:            "new-instance-type",
+						v1.LabelOSStable:                "new-os",
+						v1.LabelArchStable:              "new-arch",
 					},
 				},
 			},
 			existingNode: &v1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						v1.LabelHostname:          "new-hostname",
-						v1.LabelZoneFailureDomain: "new-zone-failure-domain",
-						v1.LabelZoneRegion:        "new-zone-region",
-						v1.LabelInstanceType:      "new-instance-type",
-						kubeletapis.LabelOS:       "new-os",
-						kubeletapis.LabelArch:     "new-arch",
-						"please-persist":          "foo",
+						v1.LabelHostname:                "new-hostname",
+						v1.LabelTopologyZone:            "new-zone-failure-domain",
+						v1.LabelTopologyRegion:          "new-zone-region",
+						v1.LabelFailureDomainBetaZone:   "new-zone-failure-domain",
+						v1.LabelFailureDomainBetaRegion: "new-zone-region",
+						v1.LabelInstanceTypeStable:      "new-instance-type",
+						v1.LabelInstanceType:            "new-instance-type",
+						v1.LabelOSStable:                "new-os",
+						v1.LabelArchStable:              "new-arch",
+						"please-persist":                "foo",
 					},
 				},
 			},
 			needsUpdate: false,
 			finalLabels: map[string]string{
-				v1.LabelHostname:          "new-hostname",
-				v1.LabelZoneFailureDomain: "new-zone-failure-domain",
-				v1.LabelZoneRegion:        "new-zone-region",
-				v1.LabelInstanceType:      "new-instance-type",
-				kubeletapis.LabelOS:       "new-os",
-				kubeletapis.LabelArch:     "new-arch",
-				"please-persist":          "foo",
+				v1.LabelHostname:                "new-hostname",
+				v1.LabelTopologyZone:            "new-zone-failure-domain",
+				v1.LabelTopologyRegion:          "new-zone-region",
+				v1.LabelFailureDomainBetaZone:   "new-zone-failure-domain",
+				v1.LabelFailureDomainBetaRegion: "new-zone-region",
+				v1.LabelInstanceTypeStable:      "new-instance-type",
+				v1.LabelInstanceType:            "new-instance-type",
+				v1.LabelOSStable:                "new-os",
+				v1.LabelArchStable:              "new-arch",
+				"please-persist":                "foo",
 			},
 		},
 		{
@@ -1632,25 +1555,31 @@ func TestUpdateDefaultLabels(t *testing.T) {
 			existingNode: &v1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						v1.LabelHostname:          "new-hostname",
-						v1.LabelZoneFailureDomain: "new-zone-failure-domain",
-						v1.LabelZoneRegion:        "new-zone-region",
-						v1.LabelInstanceType:      "new-instance-type",
-						kubeletapis.LabelOS:       "new-os",
-						kubeletapis.LabelArch:     "new-arch",
-						"please-persist":          "foo",
+						v1.LabelHostname:                "new-hostname",
+						v1.LabelTopologyZone:            "new-zone-failure-domain",
+						v1.LabelTopologyRegion:          "new-zone-region",
+						v1.LabelFailureDomainBetaZone:   "new-zone-failure-domain",
+						v1.LabelFailureDomainBetaRegion: "new-zone-region",
+						v1.LabelInstanceTypeStable:      "new-instance-type",
+						v1.LabelInstanceType:            "new-instance-type",
+						v1.LabelOSStable:                "new-os",
+						v1.LabelArchStable:              "new-arch",
+						"please-persist":                "foo",
 					},
 				},
 			},
 			needsUpdate: false,
 			finalLabels: map[string]string{
-				v1.LabelHostname:          "new-hostname",
-				v1.LabelZoneFailureDomain: "new-zone-failure-domain",
-				v1.LabelZoneRegion:        "new-zone-region",
-				v1.LabelInstanceType:      "new-instance-type",
-				kubeletapis.LabelOS:       "new-os",
-				kubeletapis.LabelArch:     "new-arch",
-				"please-persist":          "foo",
+				v1.LabelHostname:                "new-hostname",
+				v1.LabelTopologyZone:            "new-zone-failure-domain",
+				v1.LabelTopologyRegion:          "new-zone-region",
+				v1.LabelFailureDomainBetaZone:   "new-zone-failure-domain",
+				v1.LabelFailureDomainBetaRegion: "new-zone-region",
+				v1.LabelInstanceTypeStable:      "new-instance-type",
+				v1.LabelInstanceType:            "new-instance-type",
+				v1.LabelOSStable:                "new-os",
+				v1.LabelArchStable:              "new-arch",
+				"please-persist":                "foo",
 			},
 		},
 		{
@@ -1658,35 +1587,44 @@ func TestUpdateDefaultLabels(t *testing.T) {
 			initialNode: &v1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						v1.LabelHostname:          "new-hostname",
-						v1.LabelZoneFailureDomain: "new-zone-failure-domain",
-						v1.LabelZoneRegion:        "new-zone-region",
-						v1.LabelInstanceType:      "new-instance-type",
-						kubeletapis.LabelOS:       "new-os",
-						kubeletapis.LabelArch:     "new-arch",
+						v1.LabelHostname:                "new-hostname",
+						v1.LabelTopologyZone:            "new-zone-failure-domain",
+						v1.LabelTopologyRegion:          "new-zone-region",
+						v1.LabelFailureDomainBetaZone:   "new-zone-failure-domain",
+						v1.LabelFailureDomainBetaRegion: "new-zone-region",
+						v1.LabelInstanceTypeStable:      "new-instance-type",
+						v1.LabelInstanceType:            "new-instance-type",
+						v1.LabelOSStable:                "new-os",
+						v1.LabelArchStable:              "new-arch",
 					},
 				},
 			},
 			existingNode: &v1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						v1.LabelHostname:          "new-hostname",
-						v1.LabelZoneFailureDomain: "new-zone-failure-domain",
-						v1.LabelZoneRegion:        "new-zone-region",
-						v1.LabelInstanceType:      "new-instance-type",
-						kubeletapis.LabelOS:       "new-os",
-						kubeletapis.LabelArch:     "new-arch",
+						v1.LabelHostname:                "new-hostname",
+						v1.LabelTopologyZone:            "new-zone-failure-domain",
+						v1.LabelTopologyRegion:          "new-zone-region",
+						v1.LabelFailureDomainBetaZone:   "new-zone-failure-domain",
+						v1.LabelFailureDomainBetaRegion: "new-zone-region",
+						v1.LabelInstanceTypeStable:      "new-instance-type",
+						v1.LabelInstanceType:            "new-instance-type",
+						v1.LabelOSStable:                "new-os",
+						v1.LabelArchStable:              "new-arch",
 					},
 				},
 			},
 			needsUpdate: false,
 			finalLabels: map[string]string{
-				v1.LabelHostname:          "new-hostname",
-				v1.LabelZoneFailureDomain: "new-zone-failure-domain",
-				v1.LabelZoneRegion:        "new-zone-region",
-				v1.LabelInstanceType:      "new-instance-type",
-				kubeletapis.LabelOS:       "new-os",
-				kubeletapis.LabelArch:     "new-arch",
+				v1.LabelHostname:                "new-hostname",
+				v1.LabelTopologyZone:            "new-zone-failure-domain",
+				v1.LabelTopologyRegion:          "new-zone-region",
+				v1.LabelFailureDomainBetaZone:   "new-zone-failure-domain",
+				v1.LabelFailureDomainBetaRegion: "new-zone-region",
+				v1.LabelInstanceTypeStable:      "new-instance-type",
+				v1.LabelInstanceType:            "new-instance-type",
+				v1.LabelOSStable:                "new-os",
+				v1.LabelArchStable:              "new-arch",
 			},
 		},
 		{
@@ -1694,12 +1632,15 @@ func TestUpdateDefaultLabels(t *testing.T) {
 			initialNode: &v1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						v1.LabelHostname:          "new-hostname",
-						v1.LabelZoneFailureDomain: "new-zone-failure-domain",
-						v1.LabelZoneRegion:        "new-zone-region",
-						v1.LabelInstanceType:      "new-instance-type",
-						kubeletapis.LabelOS:       "new-os",
-						kubeletapis.LabelArch:     "new-arch",
+						v1.LabelHostname:                "new-hostname",
+						v1.LabelTopologyZone:            "new-zone-failure-domain",
+						v1.LabelTopologyRegion:          "new-zone-region",
+						v1.LabelFailureDomainBetaZone:   "new-zone-failure-domain",
+						v1.LabelFailureDomainBetaRegion: "new-zone-region",
+						v1.LabelInstanceTypeStable:      "new-instance-type",
+						v1.LabelInstanceType:            "new-instance-type",
+						v1.LabelOSStable:                "new-os",
+						v1.LabelArchStable:              "new-arch",
 					},
 				},
 			},
@@ -1708,12 +1649,55 @@ func TestUpdateDefaultLabels(t *testing.T) {
 			},
 			needsUpdate: true,
 			finalLabels: map[string]string{
-				v1.LabelHostname:          "new-hostname",
-				v1.LabelZoneFailureDomain: "new-zone-failure-domain",
-				v1.LabelZoneRegion:        "new-zone-region",
-				v1.LabelInstanceType:      "new-instance-type",
-				kubeletapis.LabelOS:       "new-os",
-				kubeletapis.LabelArch:     "new-arch",
+				v1.LabelHostname:                "new-hostname",
+				v1.LabelTopologyZone:            "new-zone-failure-domain",
+				v1.LabelTopologyRegion:          "new-zone-region",
+				v1.LabelFailureDomainBetaZone:   "new-zone-failure-domain",
+				v1.LabelFailureDomainBetaRegion: "new-zone-region",
+				v1.LabelInstanceTypeStable:      "new-instance-type",
+				v1.LabelInstanceType:            "new-instance-type",
+				v1.LabelOSStable:                "new-os",
+				v1.LabelArchStable:              "new-arch",
+			},
+		},
+		{
+			name: "backfill required for new stable labels for os/arch/zones/regions/instance-type",
+			initialNode: &v1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						v1.LabelHostname:                "new-hostname",
+						v1.LabelTopologyZone:            "new-zone-failure-domain",
+						v1.LabelTopologyRegion:          "new-zone-region",
+						v1.LabelFailureDomainBetaZone:   "new-zone-failure-domain",
+						v1.LabelFailureDomainBetaRegion: "new-zone-region",
+						v1.LabelInstanceTypeStable:      "new-instance-type",
+						v1.LabelInstanceType:            "new-instance-type",
+						v1.LabelOSStable:                "new-os",
+						v1.LabelArchStable:              "new-arch",
+					},
+				},
+			},
+			existingNode: &v1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						v1.LabelHostname:                "new-hostname",
+						v1.LabelFailureDomainBetaZone:   "new-zone-failure-domain",
+						v1.LabelFailureDomainBetaRegion: "new-zone-region",
+						v1.LabelInstanceType:            "new-instance-type",
+					},
+				},
+			},
+			needsUpdate: true,
+			finalLabels: map[string]string{
+				v1.LabelHostname:                "new-hostname",
+				v1.LabelTopologyZone:            "new-zone-failure-domain",
+				v1.LabelTopologyRegion:          "new-zone-region",
+				v1.LabelFailureDomainBetaZone:   "new-zone-failure-domain",
+				v1.LabelFailureDomainBetaRegion: "new-zone-region",
+				v1.LabelInstanceTypeStable:      "new-instance-type",
+				v1.LabelInstanceType:            "new-instance-type",
+				v1.LabelOSStable:                "new-os",
+				v1.LabelArchStable:              "new-arch",
 			},
 		},
 	}
@@ -1728,24 +1712,30 @@ func TestUpdateDefaultLabels(t *testing.T) {
 	}
 }
 
-func TestReconcileExtendedResource(t *testing.T) {
-	testKubelet := newTestKubelet(t, false /* controllerAttachDetachEnabled */)
-	testKubelet.kubelet.kubeClient = nil // ensure only the heartbeat client is used
-	testKubelet.kubelet.containerManager = cm.NewStubContainerManagerWithExtendedResource(true /* shouldResetExtendedResourceCapacity*/)
-	testKubeletNoReset := newTestKubelet(t, false /* controllerAttachDetachEnabled */)
-	extendedResourceName1 := v1.ResourceName("test.com/resource1")
-	extendedResourceName2 := v1.ResourceName("test.com/resource2")
-
+func TestUpdateDefaultResources(t *testing.T) {
 	cases := []struct {
 		name         string
-		testKubelet  *TestKubelet
+		initialNode  *v1.Node
 		existingNode *v1.Node
 		expectedNode *v1.Node
 		needsUpdate  bool
 	}{
 		{
-			name:        "no update needed without extended resource",
-			testKubelet: testKubelet,
+			name: "no update needed when capacity and allocatable of the existing node are not nil",
+			initialNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+					},
+				},
+			},
 			existingNode: &v1.Node{
 				Status: v1.NodeStatus{
 					Capacity: v1.ResourceList{
@@ -1775,10 +1765,489 @@ func TestReconcileExtendedResource(t *testing.T) {
 				},
 			},
 			needsUpdate: false,
+		}, {
+			name:        "no update needed when capacity and allocatable of the initial node are nil",
+			initialNode: &v1.Node{},
+			existingNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+					},
+				},
+			},
+			expectedNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+					},
+				},
+			},
+			needsUpdate: false,
+		}, {
+			name: "update needed when capacity and allocatable of the existing node are nil and capacity and allocatable of the initial node are not nil",
+			initialNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+					},
+				},
+			},
+			existingNode: &v1.Node{},
+			expectedNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+					},
+				},
+			},
+			needsUpdate: true,
+		}, {
+			name: "update needed when capacity of the existing node is nil and capacity of the initial node is not nil",
+			initialNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+					},
+				},
+			},
+			existingNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+					},
+				},
+			},
+			expectedNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+					},
+				},
+			},
+			needsUpdate: true,
+		}, {
+			name: "update needed when allocatable of the existing node is nil and allocatable of the initial node is not nil",
+			initialNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+					},
+				},
+			},
+			existingNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+					},
+				},
+			},
+			expectedNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+					},
+				},
+			},
+			needsUpdate: true,
+		}, {
+			name:         "no update needed but capacity and allocatable of existing node should be initialized",
+			initialNode:  &v1.Node{},
+			existingNode: &v1.Node{},
+			expectedNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity:    v1.ResourceList{},
+					Allocatable: v1.ResourceList{},
+				},
+			},
+			needsUpdate: false,
 		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(T *testing.T) {
+			needsUpdate := updateDefaultResources(tc.initialNode, tc.existingNode)
+			assert.Equal(t, tc.needsUpdate, needsUpdate, tc.name)
+			assert.Equal(t, tc.expectedNode, tc.existingNode, tc.name)
+		})
+	}
+}
+
+func TestReconcileHugePageResource(t *testing.T) {
+	testKubelet := newTestKubelet(t, false /* controllerAttachDetachEnabled */)
+	hugePageResourceName64Ki := v1.ResourceName("hugepages-64Ki")
+	hugePageResourceName2Mi := v1.ResourceName("hugepages-2Mi")
+	hugePageResourceName1Gi := v1.ResourceName("hugepages-1Gi")
+
+	cases := []struct {
+		name         string
+		testKubelet  *TestKubelet
+		initialNode  *v1.Node
+		existingNode *v1.Node
+		expectedNode *v1.Node
+		needsUpdate  bool
+	}{
 		{
-			name:        "extended resource capacity is not zeroed due to presence of checkpoint file",
+			name:        "no update needed when all huge page resources are similar",
 			testKubelet: testKubelet,
+			needsUpdate: false,
+			initialNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName2Mi:     resource.MustParse("100Mi"),
+						hugePageResourceName64Ki:    *resource.NewQuantity(0, resource.BinarySI),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName2Mi:     resource.MustParse("100Mi"),
+						hugePageResourceName64Ki:    *resource.NewQuantity(0, resource.BinarySI),
+					},
+				},
+			},
+			existingNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName2Mi:     resource.MustParse("100Mi"),
+						hugePageResourceName64Ki:    *resource.NewQuantity(0, resource.BinarySI),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName2Mi:     resource.MustParse("100Mi"),
+						hugePageResourceName64Ki:    *resource.NewQuantity(0, resource.BinarySI),
+					},
+				},
+			},
+			expectedNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName2Mi:     resource.MustParse("100Mi"),
+						hugePageResourceName64Ki:    *resource.NewQuantity(0, resource.BinarySI),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName2Mi:     resource.MustParse("100Mi"),
+						hugePageResourceName64Ki:    *resource.NewQuantity(0, resource.BinarySI),
+					},
+				},
+			},
+		}, {
+			name:        "update needed when new huge page resources is supported",
+			testKubelet: testKubelet,
+			needsUpdate: true,
+			initialNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName2Mi:     *resource.NewQuantity(0, resource.BinarySI),
+						hugePageResourceName1Gi:     resource.MustParse("2Gi"),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName2Mi:     *resource.NewQuantity(0, resource.BinarySI),
+						hugePageResourceName1Gi:     resource.MustParse("2Gi"),
+					},
+				},
+			},
+			existingNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName2Mi:     resource.MustParse("100Mi"),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName2Mi:     resource.MustParse("100Mi"),
+					},
+				},
+			},
+			expectedNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName2Mi:     *resource.NewQuantity(0, resource.BinarySI),
+						hugePageResourceName1Gi:     resource.MustParse("2Gi"),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName2Mi:     *resource.NewQuantity(0, resource.BinarySI),
+						hugePageResourceName1Gi:     resource.MustParse("2Gi"),
+					},
+				},
+			},
+		}, {
+			name:        "update needed when huge page resource quantity has changed",
+			testKubelet: testKubelet,
+			needsUpdate: true,
+			initialNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName1Gi:     resource.MustParse("4Gi"),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName1Gi:     resource.MustParse("4Gi"),
+					},
+				},
+			},
+			existingNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName1Gi:     resource.MustParse("2Gi"),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName1Gi:     resource.MustParse("2Gi"),
+					},
+				},
+			},
+			expectedNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName1Gi:     resource.MustParse("4Gi"),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName1Gi:     resource.MustParse("4Gi"),
+					},
+				},
+			},
+		}, {
+			name:        "update needed when a huge page resources is no longer supported",
+			testKubelet: testKubelet,
+			needsUpdate: true,
+			initialNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName1Gi:     resource.MustParse("2Gi"),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName1Gi:     resource.MustParse("2Gi"),
+					},
+				},
+			},
+			existingNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName2Mi:     *resource.NewQuantity(0, resource.BinarySI),
+						hugePageResourceName1Gi:     resource.MustParse("2Gi"),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName2Mi:     *resource.NewQuantity(0, resource.BinarySI),
+						hugePageResourceName1Gi:     resource.MustParse("2Gi"),
+					},
+				},
+			},
+			expectedNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName1Gi:     resource.MustParse("2Gi"),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName1Gi:     resource.MustParse("2Gi"),
+					},
+				},
+			},
+		}, {
+			name:        "not panic when capacity or allocatable of existing node is nil",
+			testKubelet: testKubelet,
+			needsUpdate: true,
+			initialNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName2Mi:     resource.MustParse("100Mi"),
+						hugePageResourceName64Ki:    *resource.NewQuantity(0, resource.BinarySI),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName2Mi:     resource.MustParse("100Mi"),
+						hugePageResourceName64Ki:    *resource.NewQuantity(0, resource.BinarySI),
+					},
+				},
+			},
+			existingNode: &v1.Node{
+				Status: v1.NodeStatus{},
+			},
+			expectedNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName2Mi:     resource.MustParse("100Mi"),
+						hugePageResourceName64Ki:    *resource.NewQuantity(0, resource.BinarySI),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						hugePageResourceName2Mi:     resource.MustParse("100Mi"),
+						hugePageResourceName64Ki:    *resource.NewQuantity(0, resource.BinarySI),
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(T *testing.T) {
+			defer testKubelet.Cleanup()
+			kubelet := testKubelet.kubelet
+
+			needsUpdate := kubelet.reconcileHugePageResource(tc.initialNode, tc.existingNode)
+			assert.Equal(t, tc.needsUpdate, needsUpdate, tc.name)
+			assert.Equal(t, tc.expectedNode, tc.existingNode, tc.name)
+		})
+	}
+
+}
+func TestReconcileExtendedResource(t *testing.T) {
+	testKubelet := newTestKubelet(t, false /* controllerAttachDetachEnabled */)
+	testKubelet.kubelet.kubeClient = nil // ensure only the heartbeat client is used
+	testKubelet.kubelet.containerManager = cm.NewStubContainerManagerWithExtendedResource(true /* shouldResetExtendedResourceCapacity*/)
+	testKubeletNoReset := newTestKubelet(t, false /* controllerAttachDetachEnabled */)
+	defer testKubeletNoReset.Cleanup()
+	extendedResourceName1 := v1.ResourceName("test.com/resource1")
+	extendedResourceName2 := v1.ResourceName("test.com/resource2")
+
+	cases := []struct {
+		name         string
+		testKubelet  *TestKubelet
+		initialNode  *v1.Node
+		existingNode *v1.Node
+		expectedNode *v1.Node
+		needsUpdate  bool
+	}{
+		{
+			name:        "no update needed without extended resource",
+			testKubelet: testKubelet,
+			initialNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+					},
+				},
+			},
 			existingNode: &v1.Node{
 				Status: v1.NodeStatus{
 					Capacity: v1.ResourceList{
@@ -1812,6 +2281,24 @@ func TestReconcileExtendedResource(t *testing.T) {
 		{
 			name:        "extended resource capacity is zeroed",
 			testKubelet: testKubeletNoReset,
+			initialNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						extendedResourceName1:       *resource.NewQuantity(int64(2), resource.DecimalSI),
+						extendedResourceName2:       *resource.NewQuantity(int64(10), resource.DecimalSI),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						extendedResourceName1:       *resource.NewQuantity(int64(2), resource.DecimalSI),
+						extendedResourceName2:       *resource.NewQuantity(int64(10), resource.DecimalSI),
+					},
+				},
+			},
 			existingNode: &v1.Node{
 				Status: v1.NodeStatus{
 					Capacity: v1.ResourceList{
@@ -1850,14 +2337,65 @@ func TestReconcileExtendedResource(t *testing.T) {
 			},
 			needsUpdate: true,
 		},
+		{
+			name:        "not panic when allocatable of existing node is nil",
+			testKubelet: testKubelet,
+			initialNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						extendedResourceName1:       *resource.NewQuantity(int64(2), resource.DecimalSI),
+						extendedResourceName2:       *resource.NewQuantity(int64(10), resource.DecimalSI),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						extendedResourceName1:       *resource.NewQuantity(int64(2), resource.DecimalSI),
+						extendedResourceName2:       *resource.NewQuantity(int64(10), resource.DecimalSI),
+					},
+				},
+			},
+			existingNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						extendedResourceName1:       *resource.NewQuantity(int64(2), resource.DecimalSI),
+						extendedResourceName2:       *resource.NewQuantity(int64(10), resource.DecimalSI),
+					},
+				},
+			},
+			expectedNode: &v1.Node{
+				Status: v1.NodeStatus{
+					Capacity: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						extendedResourceName1:       *resource.NewQuantity(int64(0), resource.DecimalSI),
+						extendedResourceName2:       *resource.NewQuantity(int64(0), resource.DecimalSI),
+					},
+					Allocatable: v1.ResourceList{
+						v1.ResourceCPU:              *resource.NewMilliQuantity(2000, resource.DecimalSI),
+						v1.ResourceMemory:           *resource.NewQuantity(10e9, resource.BinarySI),
+						v1.ResourceEphemeralStorage: *resource.NewQuantity(5000, resource.BinarySI),
+						extendedResourceName1:       *resource.NewQuantity(int64(0), resource.DecimalSI),
+						extendedResourceName2:       *resource.NewQuantity(int64(0), resource.DecimalSI),
+					},
+				},
+			},
+			needsUpdate: true,
+		},
 	}
 
 	for _, tc := range cases {
 		defer testKubelet.Cleanup()
 		kubelet := testKubelet.kubelet
-		initialNode := &v1.Node{}
 
-		needsUpdate := kubelet.reconcileExtendedResource(initialNode, tc.existingNode)
+		needsUpdate := kubelet.reconcileExtendedResource(tc.initialNode, tc.existingNode)
 		assert.Equal(t, tc.needsUpdate, needsUpdate, tc.name)
 		assert.Equal(t, tc.expectedNode, tc.existingNode, tc.name)
 	}
@@ -1936,7 +2474,7 @@ func TestValidateNodeIPParam(t *testing.T) {
 			ip = v.IP
 		}
 		if ip.IsLoopback() || ip.IsLinkLocalUnicast() {
-			break
+			continue
 		}
 		successTest := test{
 			nodeIP:   ip.String(),
@@ -1968,7 +2506,7 @@ func TestRegisterWithApiServerWithTaint(t *testing.T) {
 		NumCores:       2,
 		MemoryCapacity: 1024,
 	}
-	kubelet.machineInfo = machineInfo
+	kubelet.setCachedMachineInfo(machineInfo)
 
 	var gotNode runtime.Object
 	kubeClient.AddReactor("create", "nodes", func(action core.Action) (bool, runtime.Object, error) {
@@ -1991,7 +2529,7 @@ func TestRegisterWithApiServerWithTaint(t *testing.T) {
 	// Check the unschedulable taint.
 	got := gotNode.(*v1.Node)
 	unschedulableTaint := &v1.Taint{
-		Key:    schedulerapi.TaintNodeUnschedulable,
+		Key:    v1.TaintNodeUnschedulable,
 		Effect: v1.TaintEffectNoSchedule,
 	}
 
@@ -2287,7 +2825,7 @@ func TestUpdateNodeAddresses(t *testing.T) {
 				},
 			}
 
-			_, err := kubeClient.CoreV1().Nodes().Update(oldNode)
+			_, err := kubeClient.CoreV1().Nodes().Update(context.TODO(), oldNode, metav1.UpdateOptions{})
 			assert.NoError(t, err)
 			kubelet.setNodeStatusFuncs = []func(*v1.Node) error{
 				func(node *v1.Node) error {

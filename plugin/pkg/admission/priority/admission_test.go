@@ -20,7 +20,7 @@ import (
 	"context"
 	"testing"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	schedulingv1 "k8s.io/api/scheduling/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -626,7 +626,7 @@ func TestPodAdmission(t *testing.T) {
 			[]*scheduling.PriorityClass{systemClusterCritical},
 			*pods[7],
 			scheduling.SystemCriticalPriority,
-			true,
+			false,
 			nil,
 		},
 		{
@@ -681,8 +681,8 @@ func TestPodAdmission(t *testing.T) {
 
 	for _, test := range tests {
 		klog.V(4).Infof("starting test %q", test.name)
-
 		ctrl := NewPlugin()
+		ctrl.nonPreemptingPriority = true
 		// Add existing priority classes.
 		if err := addPriorityClasses(ctrl, test.existingClasses); err != nil {
 			t.Errorf("Test %q: unable to add object to informer: %v", test.name, err)
@@ -704,6 +704,7 @@ func TestPodAdmission(t *testing.T) {
 		)
 		err := admissiontesting.WithReinvocationTesting(t, ctrl).Admit(context.TODO(), attrs, nil)
 		klog.Infof("Got %v", err)
+
 		if !test.expectError {
 			if err != nil {
 				t.Errorf("Test %q: unexpected error received: %v", test.name, err)

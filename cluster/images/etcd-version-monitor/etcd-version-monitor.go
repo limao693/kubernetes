@@ -26,13 +26,12 @@ import (
 	"time"
 
 	"github.com/gogo/protobuf/proto"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	dto "github.com/prometheus/client_model/go"
-	"github.com/prometheus/common/expfmt"
 	"github.com/spf13/pflag"
 
 	"k8s.io/component-base/metrics"
-	"k8s.io/klog"
+	"k8s.io/component-base/metrics/testutil"
+	"k8s.io/klog/v2"
 )
 
 // Initialize the prometheus instrumentation and client related flags.
@@ -252,7 +251,6 @@ func getVersionPeriodically(stopCh <-chan struct{}) {
 		}
 		select {
 		case <-stopCh:
-			break
 		case <-time.After(scrapeTimeout):
 		}
 	}
@@ -273,9 +271,7 @@ func scrapeMetrics() (map[string]*dto.MetricFamily, error) {
 	}
 	defer resp.Body.Close()
 
-	// Parse the metrics in text format to a MetricFamily struct.
-	var textParser expfmt.TextParser
-	return textParser.TextToMetricFamilies(resp.Body)
+	return testutil.TextToMetricFamilies(resp.Body)
 }
 
 func renameMetric(mf *dto.MetricFamily, name string) {
@@ -402,6 +398,6 @@ func main() {
 
 	// Serve our metrics on listenAddress/metricsPath.
 	klog.Infof("Listening on: %v", listenAddress)
-	http.Handle(metricsPath, promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{}))
+	http.Handle(metricsPath, metrics.HandlerFor(gatherer, metrics.HandlerOpts{}))
 	klog.Errorf("Stopped listening/serving metrics: %v", http.ListenAndServe(listenAddress, nil))
 }

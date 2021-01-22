@@ -72,8 +72,8 @@ M++C29JwS3Hwbubg6WO3wjFjoEhpCwU6qRYUz3MRp4tHO4kxKXx+oQnUiFnR7vW0
 YkNtGc1RUDHwecCTFpJtPb7Yu/E=
 -----END CERTIFICATE-----`)
 
-func TestNewTLSContent(t *testing.T) {
-	testCertProvider, err := NewStaticCertKeyContent("test-cert", serverCert, serverKey)
+func TestNewStaticCertKeyContent(t *testing.T) {
+	testCertProvider, err := NewStaticSNICertKeyContent("test-cert", serverCert, serverKey, "foo")
 	if err != nil {
 		t.Error(err)
 	}
@@ -82,24 +82,22 @@ func TestNewTLSContent(t *testing.T) {
 		name        string
 		clientCA    CAContentProvider
 		servingCert CertKeyContentProvider
+		sniCerts    []SNICertKeyContentProvider
 
 		expected    *dynamicCertificateContent
 		expectedErr string
 	}{
 		{
 			name:        "filled",
-			clientCA:    NewStaticCAContent("test-ca", []byte("content-1")),
+			clientCA:    &staticCAContent{name: "test-ca", caBundle: &caBundleAndVerifier{caBundle: []byte("content-1")}},
 			servingCert: testCertProvider,
+			sniCerts:    []SNICertKeyContentProvider{testCertProvider},
 			expected: &dynamicCertificateContent{
-				clientCA:    caBundleContent{caBundle: []byte("content-1")},
+				clientCA: caBundleContent{caBundle: []byte("content-1")},
+				// ignore sni names for serving cert
 				servingCert: certKeyContent{cert: serverCert, key: serverKey},
+				sniCerts:    []sniCertKeyContent{{certKeyContent: certKeyContent{cert: serverCert, key: serverKey}, sniNames: []string{"foo"}}},
 			},
-		},
-		{
-			name:        "missingCA",
-			clientCA:    NewStaticCAContent("test-ca", []byte("")),
-			expected:    nil,
-			expectedErr: `not loading an empty client ca bundle from "test-ca"`,
 		},
 		{
 			name:     "nil",
@@ -112,6 +110,7 @@ func TestNewTLSContent(t *testing.T) {
 			c := &DynamicServingCertificateController{
 				clientCA:    test.clientCA,
 				servingCert: test.servingCert,
+				sniCerts:    test.sniCerts,
 			}
 			actual, err := c.newTLSContent()
 			if !reflect.DeepEqual(actual, test.expected) {

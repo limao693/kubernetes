@@ -17,6 +17,7 @@ limitations under the License.
 package metrics
 
 import (
+	"context"
 	"github.com/blang/semver"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -41,8 +42,16 @@ func NewCounter(opts *CounterOpts) *Counter {
 		lazyMetric:  lazyMetric{},
 	}
 	kc.setPrometheusCounter(noop)
-	kc.lazyInit(kc)
+	kc.lazyInit(kc, BuildFQName(opts.Namespace, opts.Subsystem, opts.Name))
 	return kc
+}
+
+// Reset resets the underlying prometheus Counter to start counting from 0 again
+func (c *Counter) Reset() {
+	if !c.IsCreated() {
+		return
+	}
+	c.setPrometheusCounter(prometheus.NewCounter(c.CounterOpts.toPromCounterOpts()))
 }
 
 // setPrometheusCounter sets the underlying CounterMetric object, i.e. the thing that does the measurement.
@@ -71,6 +80,11 @@ func (c *Counter) initializeDeprecatedMetric() {
 	c.initializeMetric()
 }
 
+// WithContext allows the normal Counter metric to pass in context. The context is no-op now.
+func (c *Counter) WithContext(ctx context.Context) CounterMetric {
+	return c.CounterMetric
+}
+
 // CounterVec is the internal representation of our wrapping struct around prometheus
 // counterVecs. CounterVec implements both kubeCollector and CounterVecMetric.
 type CounterVec struct {
@@ -92,7 +106,7 @@ func NewCounterVec(opts *CounterOpts, labels []string) *CounterVec {
 		originalLabels: labels,
 		lazyMetric:     lazyMetric{},
 	}
-	cv.lazyInit(cv)
+	cv.lazyInit(cv, BuildFQName(opts.Namespace, opts.Subsystem, opts.Name))
 	return cv
 }
 
@@ -158,4 +172,37 @@ func (v *CounterVec) Delete(labels map[string]string) bool {
 		return false // since we haven't created the metric, we haven't deleted a metric with the passed in values
 	}
 	return v.CounterVec.Delete(labels)
+}
+
+// Reset deletes all metrics in this vector.
+func (v *CounterVec) Reset() {
+	if !v.IsCreated() {
+		return
+	}
+
+	v.CounterVec.Reset()
+}
+
+// WithContext returns wrapped CounterVec with context
+func (v *CounterVec) WithContext(ctx context.Context) *CounterVecWithContext {
+	return &CounterVecWithContext{
+		ctx:        ctx,
+		CounterVec: *v,
+	}
+}
+
+// CounterVecWithContext is the wrapper of CounterVec with context.
+type CounterVecWithContext struct {
+	CounterVec
+	ctx context.Context
+}
+
+// WithLabelValues is the wrapper of CounterVec.WithLabelValues.
+func (vc *CounterVecWithContext) WithLabelValues(lvs ...string) CounterMetric {
+	return vc.CounterVec.WithLabelValues(lvs...)
+}
+
+// With is the wrapper of CounterVec.With.
+func (vc *CounterVecWithContext) With(labels map[string]string) CounterMetric {
+	return vc.CounterVec.With(labels)
 }

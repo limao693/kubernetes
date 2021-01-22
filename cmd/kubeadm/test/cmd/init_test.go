@@ -17,6 +17,8 @@ limitations under the License.
 package kubeadm
 
 import (
+	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -30,6 +32,10 @@ import (
 )
 
 func runKubeadmInit(args ...string) (string, string, int, error) {
+	const dryRunDir = "KUBEADM_INIT_DRYRUN_DIR"
+	if err := os.Setenv(dryRunDir, os.TempDir()); err != nil {
+		panic(fmt.Sprintf("could not set the %s environment variable", dryRunDir))
+	}
 	kubeadmPath := getKubeadmPath()
 	kubeadmArgs := []string{"init", "--dry-run", "--ignore-preflight-errors=all"}
 	kubeadmArgs = append(kubeadmArgs, args...)
@@ -37,11 +43,6 @@ func runKubeadmInit(args ...string) (string, string, int, error) {
 }
 
 func TestCmdInitToken(t *testing.T) {
-	if *kubeadmCmdSkip {
-		t.Log("kubeadm cmd tests being skipped")
-		t.Skip()
-	}
-
 	initTest := []struct {
 		name     string
 		args     string
@@ -86,11 +87,6 @@ func TestCmdInitToken(t *testing.T) {
 }
 
 func TestCmdInitKubernetesVersion(t *testing.T) {
-	if *kubeadmCmdSkip {
-		t.Log("kubeadm cmd tests being skipped")
-		t.Skip()
-	}
-
 	initTest := []struct {
 		name     string
 		args     string
@@ -130,11 +126,6 @@ func TestCmdInitKubernetesVersion(t *testing.T) {
 }
 
 func TestCmdInitConfig(t *testing.T) {
-	if *kubeadmCmdSkip {
-		t.Log("kubeadm cmd tests being skipped")
-		t.Skip()
-	}
-
 	initTest := []struct {
 		name     string
 		args     string
@@ -180,6 +171,16 @@ func TestCmdInitConfig(t *testing.T) {
 			args:     "--kubernetes-version=1.11.0 --config=testdata/init/v1beta2.yaml",
 			expected: false,
 		},
+		{
+			name:     "can load current component config",
+			args:     "--config=testdata/init/current-component-config.yaml",
+			expected: true,
+		},
+		{
+			name:     "can't load old component config",
+			args:     "--config=testdata/init/old-component-config.yaml",
+			expected: false,
+		},
 	}
 
 	for _, rt := range initTest {
@@ -204,11 +205,6 @@ func TestCmdInitConfig(t *testing.T) {
 }
 
 func TestCmdInitCertPhaseCSR(t *testing.T) {
-	if *kubeadmCmdSkip {
-		t.Log("kubeadm cmd tests being skipped")
-		t.Skip()
-	}
-
 	tests := []struct {
 		name          string
 		baseName      string
@@ -216,11 +212,11 @@ func TestCmdInitCertPhaseCSR(t *testing.T) {
 	}{
 		{
 			name:     "generate CSR",
-			baseName: certs.KubeadmCertKubeletClient.BaseName,
+			baseName: certs.KubeadmCertKubeletClient().BaseName,
 		},
 		{
 			name:          "fails on CSR",
-			baseName:      certs.KubeadmCertRootCA.BaseName,
+			baseName:      certs.KubeadmCertRootCA().BaseName,
 			expectedError: "unknown flag: --csr-only",
 		},
 		{
@@ -233,7 +229,7 @@ func TestCmdInitCertPhaseCSR(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			csrDir := testutil.SetupTempDir(t)
-			cert := &certs.KubeadmCertKubeletClient
+			cert := certs.KubeadmCertKubeletClient()
 			kubeadmPath := getKubeadmPath()
 			_, stderr, _, err := RunCmd(kubeadmPath,
 				"init",
@@ -269,11 +265,6 @@ func TestCmdInitCertPhaseCSR(t *testing.T) {
 }
 
 func TestCmdInitAPIPort(t *testing.T) {
-	if *kubeadmCmdSkip {
-		t.Log("kubeadm cmd tests being skipped")
-		t.Skip()
-	}
-
 	initTest := []struct {
 		name     string
 		args     string
@@ -329,11 +320,6 @@ func TestCmdInitAPIPort(t *testing.T) {
 func TestCmdInitFeatureGates(t *testing.T) {
 	const PanicExitcode = 2
 
-	if *kubeadmCmdSkip {
-		t.Log("kubeadm cmd tests being skipped")
-		t.Skip()
-	}
-
 	initTest := []struct {
 		name string
 		args string
@@ -343,12 +329,12 @@ func TestCmdInitFeatureGates(t *testing.T) {
 			args: "",
 		},
 		{
-			name: "feature gate CoreDNS=true",
-			args: "--feature-gates=CoreDNS=true",
-		},
-		{
 			name: "feature gate IPv6DualStack=true",
 			args: "--feature-gates=IPv6DualStack=true",
+		},
+		{
+			name: "feature gate PublicKeysECDSA=true",
+			args: "--feature-gates=PublicKeysECDSA=true",
 		},
 	}
 
